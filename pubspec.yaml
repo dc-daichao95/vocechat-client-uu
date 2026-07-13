@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 version: 0.2.113+83
 
 environment:
-  sdk: ">=2.17.0 <3.0.0"
+  sdk: ">=3.0.0 <4.0.0"
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -100,20 +100,11 @@ dependencies:
 
 dependency_overrides:
   azlistview:
-    git: 
-      url: https://github.com/shuotwang/azlistview.git
-      ref: master
-  
-  # for debug use
-  # voce_widgets:
-  #   path: /Users/shuotwang/Documents/privoce/my_projects/voce_widgets/voce_widgets/
-  
-  # If commit hash is not the same as the latest on github, add or remove '.git' to or from the end of url.
-  # for example: https://domain.com.git/ -> https://domain.com/, and run pub get.
+    path: C:/devtools/gitdeps/azlistview
   voce_widgets:
-    git:
-      url: https://github.com/Privoce/voce_widgets.git
-      ref: master
+    path: C:/devtools/gitdeps/voce_widgets
+  wechat_picker_library: 1.0.5
+  photo_manager: 3.5.0
 
 dev_dependencies:
   flutter_test:

@@ -94,6 +94,13 @@ flutter {
     source '../..'
 }
 
+configurations.all {
+    resolutionStrategy {
+        // AGP 7.2 D8 cannot dex exifinterface 1.4.x; pin to a compatible version.
+        force 'androidx.exifinterface:exifinterface:1.3.7'
+    }
+}
+
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
 
