@@ -560,6 +560,26 @@ class ChatMsgDao extends Dao<ChatMsgM> {
     return null;
   }
 
+  /// Get the minimum mid in a DM conversation with [dmUid].
+  ///
+  /// Used as the `before` cursor when fetching older DM history from server.
+  Future<int?> getDmMinMid(int dmUid) async {
+    String sqlStr =
+        'SELECT MIN(${ChatMsgM.F_mid}) FROM ${ChatMsgM.F_tableName} WHERE ${ChatMsgM.F_dmUid} = $dmUid';
+    List<Map<String, Object?>> msgRecords = await db.rawQuery(sqlStr);
+
+    int minMid = double.maxFinite.toInt();
+    if (msgRecords.isNotEmpty &&
+        msgRecords.first["MIN(${ChatMsgM.F_mid})"] != null) {
+      minMid = min(minMid, msgRecords.first["MIN(${ChatMsgM.F_mid})"] as int);
+    }
+
+    if (minMid < double.maxFinite.toInt() && minMid > 0) {
+      return minMid;
+    }
+    return null;
+  }
+
   Future<ChatMsgM?> getMsgByMid(int mid, {bool withReactions = true}) async {
     final msg =
         await super.first(where: "${ChatMsgM.F_mid} = ?", whereArgs: [mid]);

@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:vocechat_client/api/lib/group_api.dart';
+import 'package:vocechat_client/api/lib/user_api.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
 import 'package:vocechat_client/dao/init_dao/group_info.dart';
@@ -74,21 +75,37 @@ class ChatPageController {
     bool localEnds = !_pageMeta.hasNextPage;
     bool serverEnds = true;
 
-    if (isUser) {
-      return localEnds;
-    } else {
-      final gid = groupInfoMNotifier!.value.gid;
-      final beforeMid = await ChatMsgDao().getChannelMinMid(gid);
-      final res = await GroupApi().getHistory(gid, beforeMid, limit: 25);
+    try {
+      if (isUser) {
+        final uid = userInfoMNotifier!.value.uid;
+        final beforeMid = await ChatMsgDao().getDmMinMid(uid);
+        final res = await UserApi().getHistory(uid, beforeMid, limit: 25);
 
-      if (res.statusCode != 200 ||
-          (res.statusCode == 200 && (res.data as List).isEmpty)) {
-        serverEnds = true;
+        if (res.statusCode != 200 ||
+            (res.statusCode == 200 && (res.data as List).isEmpty)) {
+          serverEnds = true;
+        } else {
+          if ((res.data as List).isNotEmpty) serverEnds = false;
+        }
       } else {
-        if ((res.data as List).isNotEmpty) serverEnds = false;
+        final gid = groupInfoMNotifier!.value.gid;
+        final beforeMid = await ChatMsgDao().getChannelMinMid(gid);
+        final res = await GroupApi().getHistory(gid, beforeMid, limit: 25);
+
+        if (res.statusCode != 200 ||
+            (res.statusCode == 200 && (res.data as List).isEmpty)) {
+          serverEnds = true;
+        } else {
+          if ((res.data as List).isNotEmpty) serverEnds = false;
+        }
       }
-      return localEnds && serverEnds;
+    } catch (e) {
+      // If the server does not support the history endpoint (e.g. DM history),
+      // treat it as "server has no more" instead of blocking pagination.
+      App.logger.severe(e);
+      serverEnds = true;
     }
+    return localEnds && serverEnds;
   }
 
   int get count => tileDataList.length;
@@ -98,6 +115,7 @@ class ChatPageController {
     App.app.chatService.subscribeUsers(onUser);
     App.app.chatService.subscribeMidDelete(onDeleteWithMid);
     App.app.chatService.subscribeLmidDelete(onDeleteWithLocalMid);
+    App.app.chatService.subscribeReady(onReady);
   }
 
   void handleUnsubscriptions() {
@@ -105,6 +123,16 @@ class ChatPageController {
     App.app.chatService.unsubscribeUsers(onUser);
     App.app.chatService.unsubscribeMidDelete(onDeleteWithMid);
     App.app.chatService.unsubscribeLmidDelete(onDeleteWithLocalMid);
+    App.app.chatService.unsubscribeReady(onReady);
+  }
+
+  /// Solution 5: when SSE sync becomes ready, if this chat is still empty
+  /// (opened before any data existed locally or from server), try loading once
+  /// so messages appear without needing to reopen the chat.
+  Future<void> onReady({bool clearAll = false}) async {
+    if (tileDataList.isEmpty) {
+      await loadHistory(enableServerHistory: true);
+    }
   }
 
   /// Must be called after chat page is dismissed.
@@ -136,7 +164,10 @@ class ChatPageController {
   /// Includes first page of messages and the user info map.
   /// Should be called before the chat page is built, then pass into the chat page.
   Future<void> prepare() async {
-    await loadHistory(enableServerHistory: false);
+    // Enable server history so opening a chat shows messages even when the
+    // SSE sync has not reached the "ready" state yet (messages are not in the
+    // local DB). Applies to both channels and DMs.
+    await loadHistory(enableServerHistory: true);
   }
 
   Future<void> updateReadIndex(int mid) async {
@@ -257,8 +288,7 @@ class ChatPageController {
       // Though user api has the same history api, it makes no sense as there
       // won't be any message history before the user is created, thus there is
       // no DM history.
-      if (isChannel &&
-          enableServerHistory &&
+      if (enableServerHistory &&
           msgList.length < defaultPageSize &&
           !_pageMeta.hasNextPage) {
         await _loadServerHistory(msgList);
@@ -320,9 +350,13 @@ class ChatPageController {
   }
 
   Future<void> _loadServerHistory(List<ChatMsgM> msgList) async {
-    final gid = groupInfoMNotifier!.value.gid;
-
-    await _recursivelyLoadServerHistory(msgList, gid);
+    if (isChannel) {
+      final gid = groupInfoMNotifier!.value.gid;
+      await _recursivelyLoadServerHistory(msgList, gid);
+    } else if (isUser) {
+      final uid = userInfoMNotifier!.value.uid;
+      await _recursivelyLoadServerDmHistory(msgList, uid);
+    }
   }
 
   Future<void> _recursivelyLoadServerHistory(
@@ -337,6 +371,29 @@ class ChatPageController {
 
     if (msgList.length < defaultPageSize && msgs.isNotEmpty) {
       await _recursivelyLoadServerHistory(msgList, gid);
+    }
+  }
+
+  /// Load DM history from server, mirroring [_recursivelyLoadServerHistory].
+  ///
+  /// If the server does not support DM history, a non-200 response ends the
+  /// recursion gracefully without throwing.
+  Future<void> _recursivelyLoadServerDmHistory(
+      List<ChatMsgM> msgList, int uid) async {
+    try {
+      final beforeMid = await ChatMsgDao().getDmMinMid(uid);
+      final res = await UserApi().getHistory(uid, beforeMid, limit: 25);
+
+      if (res.statusCode != 200 || res.data == null) return;
+
+      final msgs = await App.app.chatService.handleServerHistory(res.data);
+      msgList.addAll(await removeExpiredMsgs(msgs));
+
+      if (msgList.length < defaultPageSize && msgs.isNotEmpty) {
+        await _recursivelyLoadServerDmHistory(msgList, uid);
+      }
+    } catch (e) {
+      App.logger.severe(e);
     }
   }
 

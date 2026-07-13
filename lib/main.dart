@@ -147,6 +147,12 @@ class _VoceChatAppState extends State<VoceChatApp> with WidgetsBindingObserver {
 
   bool _firstTimeRefreshSinceAppOpens = true;
 
+  /// Solution 4: debounce rapid [_connect] calls (e.g. multiple connectivity
+  /// change events on launch) so overlapping connect/close cycles do not keep
+  /// interrupting the SSE sync before it reaches "ready".
+  DateTime? _lastConnectAt;
+  static const Duration _connectDebounce = Duration(seconds: 2);
+
   @override
   void initState() {
     super.initState();
@@ -423,6 +429,14 @@ class _VoceChatAppState extends State<VoceChatApp> with WidgetsBindingObserver {
 
   Future<void> _connect() async {
     if (_isConnecting) return;
+
+    // Solution 4: collapse bursts of connect requests within a short window.
+    final now = DateTime.now();
+    if (_lastConnectAt != null &&
+        now.difference(_lastConnectAt!) < _connectDebounce) {
+      return;
+    }
+    _lastConnectAt = now;
 
     _isConnecting = true;
 

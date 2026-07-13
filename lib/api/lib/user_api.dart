@@ -238,6 +238,24 @@ class UserApi {
     return newRes;
   }
 
+  /// Fetch DM (direct message) history with [uid].
+  ///
+  /// Mirrors [GroupApi.getHistory]. The server exposes
+  /// `GET /api/user/{uid}/history?limit=&before=`. If the server does not
+  /// support it, callers should treat a non-200 response as "no history".
+  Future<Response> getHistory(int uid, int? beforeMid,
+      {int limit = 20, bool enableRetry = false}) async {
+    final dio = DioUtil.token(baseUrl: _baseUrl, enableRetry: enableRetry);
+
+    String url = "/$uid/history?limit=$limit";
+
+    if (beforeMid != null) {
+      url += "&before=$beforeMid";
+    }
+
+    return dio.get(url);
+  }
+
   Future<Response<UserInfo>> getUserByUid(int uid) async {
     final dio = DioUtil(baseUrl: _baseUrl);
 

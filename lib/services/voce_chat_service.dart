@@ -35,6 +35,8 @@ import 'package:vocechat_client/main.dart';
 import 'package:vocechat_client/models/local_kits.dart';
 import 'package:vocechat_client/services/file_handler.dart';
 import 'package:vocechat_client/services/file_handler/audio_file_handler.dart';
+import 'package:vocechat_client/services/persistent_connection/dio_sse.dart';
+import 'package:vocechat_client/services/persistent_connection/persistent_connection.dart';
 import 'package:vocechat_client/services/persistent_connection/sse.dart';
 import 'package:vocechat_client/services/persistent_connection/web_socket.dart';
 import 'package:vocechat_client/services/sse/server_event_consts.dart';
@@ -63,6 +65,18 @@ typedef LocalmidDeleteAware = Future<void> Function(String localMid);
 typedef UserStatusAware = Future<void> Function(int uid, bool isOnline);
 typedef ChatServerAware = Future<void> Function(ChatServerM chatServerM);
 
+/// Solution 3 toggle: when true, the SSE stream is opened through Dio
+/// ([VoceDioSse]) so it shares Dio's TLS configuration (fixes the "REST works
+/// but SSE fails on self-signed certs" asymmetry). When false, the legacy
+/// `EventSource`-based [VoceSse] is used.
+///
+/// Default is false to keep the verified transport as-is; flip to true and
+/// rebuild to validate the Dio-based SSE on a real device / self-signed server.
+const bool useDioSse = false;
+
+/// The active persistent SSE connection, selected by [useDioSse].
+PersistentConnection get activeSse => useDioSse ? VoceDioSse() : VoceSse();
+
 class VoceChatService {
   VoceChatService() {
     setReadIndexTimer();
@@ -80,7 +94,9 @@ class VoceChatService {
     eventQueue.clear();
     readIndexTimer.cancel();
     // VoceWebSocket().close();
+    // Close both implementations so switching [useDioSse] never leaks a stream.
     VoceSse().close();
+    VoceDioSse().close();
   }
 
   final Set<UsersAware> _userListeners = {};
@@ -144,14 +160,15 @@ class VoceChatService {
   }
 
   Future<void> _initSse() async {
-    VoceSse().subscribeServerEvent(handleSseEvent);
-    VoceSse().subscribeReady((ready) {
+    final conn = activeSse;
+    conn.subscribeServerEvent(handleSseEvent);
+    conn.subscribeReady((ready) {
       afterReady = ready;
     });
 
     try {
       await prePersistentConnectionInits();
-      await VoceSse().connect();
+      await conn.connect();
     } catch (e) {
       App.logger.severe(e);
     }
@@ -1612,6 +1629,18 @@ class VoceChatService {
       });
     } else {
       msgMap.addAll({chatMsgM.mid: chatMsgM});
+
+      // Solution 2: persist incrementally so pre-"ready" messages are not lost
+      // if the connection drops before the ready event. We intentionally do NOT
+      // advance maxMid here: maxMid (which also covers reactions still held in
+      // memory) is only advanced in [saveMaxMid] on ready, so a reconnect before
+      // ready still re-fetches from the previous cursor. [addOrUpdate] is
+      // idempotent, so the later batch save on ready causes no duplication.
+      try {
+        await ChatMsgDao().addOrUpdate(chatMsgM);
+      } catch (e) {
+        App.logger.severe(e);
+      }
     }
   }
 
