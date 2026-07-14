@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -8,6 +9,7 @@ import 'package:vocechat_client/api/lib/saved_api.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
 import 'package:path/path.dart' as p;
+import 'package:vocechat_client/services/e2e_crypto.dart';
 import 'package:vocechat_client/shared_funcs.dart';
 
 enum FileType { file, image, thumb, videoThumb }
@@ -744,6 +746,16 @@ class FileHandler {
     String filePath = chatMsgM.msgNormal?.content ?? chatMsgM.msgReply!.content;
     String localMid = chatMsgM.localMid;
     String fileName = chatMsgM.msgNormal?.properties?["name"];
+    final props = chatMsgM.msgNormal?.properties ??
+        chatMsgM.msgReply?.properties ??
+        <String, dynamic>{};
+    final e2eMkB64 = props['e2e_file_mk'] as String?;
+    final e2eFivB64 = props['e2e_file_fiv'] as String?;
+    final e2ePath = (props['e2e_file_path'] as String?) ?? filePath;
+    final isE2eFile = e2eMkB64 != null &&
+        e2eMkB64.isNotEmpty &&
+        e2eFivB64 != null &&
+        e2eFivB64.isNotEmpty;
 
     if (await fileExists(chatId, localMid, fileName)) {
       final file = await readFile(chatId, localMid, fileName);
@@ -752,9 +764,24 @@ class FileHandler {
 
     ResourceApi resourceApi = ResourceApi();
     try {
-      final res = await resourceApi.getFile(filePath, false, true, onProgress);
+      final downloadPath = isE2eFile ? e2ePath : filePath;
+      final res =
+          await resourceApi.getFile(downloadPath, false, true, onProgress);
       if (res.statusCode == 200 && res.data != null) {
-        return saveFile(chatId, res.data!, localMid, fileName);
+        Uint8List bytes = res.data!;
+        if (isE2eFile) {
+          try {
+            bytes = await E2eCrypto.decryptFileBytes(
+              cipherWithTag: bytes,
+              mk: base64Decode(e2eMkB64),
+              fiv: base64Decode(e2eFivB64),
+            );
+          } catch (e) {
+            App.logger.severe('E2E file decrypt failed: $e');
+            return null;
+          }
+        }
+        return saveFile(chatId, bytes, localMid, fileName);
       }
     } catch (e) {
       App.logger.severe(e);

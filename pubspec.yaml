@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # Read more about iOS versioning at
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 
-version: 0.2.113+83
+version: 0.2.124+94
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -95,8 +95,9 @@ dependencies:
   photo_view: ^0.14.0
   video_thumbnail: ^0.5.3
   web_socket_channel: ^2.4.0
-  
-  
+  cryptography: ^2.7.0
+  # Pure-Dart P-256 ECDH (cryptography's DartEcdh throws UnimplementedError on Windows)
+  pointycastle: ^3.9.1
 
 dependency_overrides:
   azlistview:

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -69,17 +70,8 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
   void initState() {
     super.initState();
 
-    switch (App.app.chatServerM.properties.commonInfo?.chatLayoutMode) {
-      case "Left":
-        chatLayoutMode.value = ChatLayoutMode.Left;
-        break;
-      case "SelfRight":
-        chatLayoutMode.value = ChatLayoutMode.SelfRight;
-        break;
-      default:
-        chatLayoutMode.value = ChatLayoutMode.Left;
-        break;
-    }
+    // Always use WhatsApp-style layout: own messages on the right.
+    chatLayoutMode.value = ChatLayoutMode.SelfRight;
 
     App.app.chatService.subscribeChatServer(_onChatServerChange);
     widget.tileData.initAutoDeleteTimer();
@@ -274,6 +266,15 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
   }
 
   Widget _buildTitle(BuildContext context) {
+    final msg = widget.tileData.chatMsgMNotifier.value;
+    final contentType = msg.detailContentTypeStr;
+    bool wasE2e = contentType == typeE2e;
+    try {
+      final props = json.decode(msg.detail)['properties'];
+      if (props is Map && (props['e2e'] == true || props['e2e_ver'] != null)) {
+        wasE2e = true;
+      }
+    } catch (_) {}
     List<Widget> titleRowWidgets = [
       Flexible(
         child: Text(
@@ -291,7 +292,30 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
           style: const TextStyle(
               fontWeight: FontWeight.w500,
               fontSize: 12,
-              color: Color(0xFFBFBFBF)))
+              color: Color(0xFFBFBFBF))),
+      if (wasE2e)
+        Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Icon(Icons.lock_outline, size: 12, color: Color(0xFF047857)),
+        )
+      else if (contentType == typeText ||
+          contentType == typeMarkdown ||
+          contentType == typeFile)
+        Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: const [
+              Icon(Icons.lock_open, size: 12, color: Color(0xFFB45309)),
+              SizedBox(width: 2),
+              Text('Unencrypted',
+                  style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFFB45309))),
+            ],
+          ),
+        ),
     ];
 
     return ValueListenableBuilder<ChatLayoutMode>(
@@ -403,9 +427,9 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
         valueListenable: widget.tileData.chatMsgMNotifier,
         builder: (context, chatMsgM, _) {
           if (chatMsgM.isTextMsg) {
-            return VoceTextBubble(chatMsgM: chatMsgM);
+            return _wrapBubble(VoceTextBubble(chatMsgM: chatMsgM, isSelf: isSelf));
           } else if (chatMsgM.isMarkdownMsg) {
-            return VoceMdBubble(chatMsgM: chatMsgM);
+            return _wrapBubble(VoceMdBubble(chatMsgM: chatMsgM, isSelf: isSelf));
           } else if (chatMsgM.isFileMsg) {
             if (chatMsgM.isImageMsg) {
               return VoceTileImageBubble.tileData(
@@ -419,14 +443,14 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
               final path = msgNormal.content;
               final name = msgNormal.properties?["name"] ?? "";
               final size = msgNormal.properties?["size"] ?? 0;
-              return VoceFileBubble(
+              return _wrapBubble(VoceFileBubble(
                   filePath: path,
                   name: name,
                   size: size,
                   getLocalFile: () =>
                       FileHandler.singleton.getLocalFile(chatMsgM),
                   getFile: (onProgress) =>
-                      FileHandler.singleton.getFile(chatMsgM, onProgress));
+                      FileHandler.singleton.getFile(chatMsgM, onProgress)));
             }
           } else if (chatMsgM.isAudioMsg) {
             return ValueListenableBuilder<ChatLayoutMode>(
@@ -441,7 +465,10 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
             return VoceArchiveBubble.tileData(
                 key: ObjectKey(widget.tileData), tileData: widget.tileData);
           }
-          return Text(AppLocalizations.of(context)!.unsupportedMessageType);
+          return _wrapBubble(
+              Text(AppLocalizations.of(context)!.unsupportedMessageType,
+                  style: TextStyle(
+                      color: isSelf ? Colors.white : AppColors.coolGrey700)));
         });
   }
 
@@ -750,17 +777,25 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
   }
 
   Future<void> _onChatServerChange(ChatServerM chatServerM) async {
-    switch (chatServerM.properties.commonInfo?.chatLayoutMode) {
-      case "Left":
-        chatLayoutMode.value = ChatLayoutMode.Left;
-        break;
-      case "SelfRight":
-        chatLayoutMode.value = ChatLayoutMode.SelfRight;
-        break;
-      default:
-        chatLayoutMode.value = ChatLayoutMode.Left;
-        break;
-    }
+    chatLayoutMode.value = ChatLayoutMode.SelfRight;
+  }
+
+  /// Colored chat bubble matching web (emerald self / gray other).
+  Widget _wrapBubble(Widget child) {
+    final bg = isSelf
+        ? const Color(0xFF059669) // emerald-600
+        : AppColors.grey100;
+    return Container(
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.of(context).size.width * 0.72,
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: child,
+    );
   }
 }
 

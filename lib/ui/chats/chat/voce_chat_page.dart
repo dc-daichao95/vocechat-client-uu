@@ -28,6 +28,7 @@ import 'package:vocechat_client/shared_funcs.dart';
 import 'package:vocechat_client/ui/app_colors.dart';
 import 'package:vocechat_client/ui/app_icons_icons.dart';
 import 'package:vocechat_client/ui/app_text_styles.dart';
+import 'package:vocechat_client/ui/chats/chat/e2e_session_banner.dart';
 import 'package:vocechat_client/ui/chats/chat/chat_bar.dart';
 import 'package:vocechat_client/ui/chats/chat/input_field/app_mentions.dart';
 import 'package:vocechat_client/ui/chats/chat/input_field/chat_textfield.dart';
@@ -56,10 +57,16 @@ class VoceChatPage extends StatefulWidget {
 
   final FocusNode _focusNode = FocusNode();
 
+  /// When true, hide back button and call [onCloseEmbedded] instead of pop.
+  final bool embedded;
+  final VoidCallback? onCloseEmbedded;
+
   VoceChatPage.user({
     Key? key,
     required this.mentionsKey,
     required this.controller,
+    this.embedded = false,
+    this.onCloseEmbedded,
   })  : groupInfoNotifier = null,
         userInfoNotifier = controller.userInfoMNotifier,
         super(key: key);
@@ -68,6 +75,8 @@ class VoceChatPage extends StatefulWidget {
     Key? key,
     required this.mentionsKey,
     required this.controller,
+    this.embedded = false,
+    this.onCloseEmbedded,
   })  : userInfoNotifier = null,
         groupInfoNotifier = controller.groupInfoMNotifier,
         super(key: key);
@@ -172,8 +181,14 @@ class _VoceChatPageState extends State<VoceChatPage>
         groupInfoNotifier: widget.groupInfoNotifier,
         userInfoNotifier: widget.userInfoNotifier,
         unreadCount: globals.unreadCountSum,
+        hideBack: widget.embedded,
+        onRefresh: _onRefresh,
         onPop: () {
-          Navigator.of(context).pop();
+          if (widget.embedded) {
+            widget.onCloseEmbedded?.call();
+          } else {
+            Navigator.of(context).pop();
+          }
         },
       ),
       body: GestureDetector(
@@ -189,6 +204,10 @@ class _VoceChatPageState extends State<VoceChatPage>
                 Expanded(
                     child: Column(
                   children: [
+                    E2eSessionBanner(
+                      groupInfoNotifier: widget.groupInfoNotifier,
+                      userInfoNotifier: widget.userInfoNotifier,
+                    ),
                     _buildContactStatusFloating(),
                     _buildVoceMsgList(),
                   ],
@@ -216,6 +235,22 @@ class _VoceChatPageState extends State<VoceChatPage>
         )),
       ),
     );
+  }
+
+  Future<void> _onRefresh() async {
+    try {
+      await SharedFuncs.renewAuthToken(forceRefresh: true);
+      await App.app.chatService.initPersistentConnection();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Refreshed')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Refresh failed')),
+      );
+    }
   }
 
   Widget _buildContactStatusFloating() {

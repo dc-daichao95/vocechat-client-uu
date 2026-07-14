@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
@@ -9,6 +11,7 @@ import 'package:vocechat_client/ui/app_colors.dart';
 import 'package:vocechat_client/ui/app_icons_icons.dart';
 import 'package:vocechat_client/ui/chats/chats/chats_drawer.dart';
 import 'package:vocechat_client/ui/chats/chats/chats_page.dart';
+import 'package:vocechat_client/ui/chats/chats/desktop/desktop_shell.dart';
 import 'package:vocechat_client/ui/contact/contacts_page.dart';
 import 'package:vocechat_client/ui/settings/settings_page.dart';
 
@@ -53,7 +56,9 @@ class _ChatsMainPageState extends State<ChatsMainPage> {
         builder: (context, disableGesture, _) {
           return AbsorbPointer(
             absorbing: disableGesture,
-            child: Scaffold(
+            child: Platform.isWindows
+                ? DesktopShell(disableGesture: this.disableGesture)
+                : Scaffold(
               drawer: SharedFuncs.hasPreSetServerUrl()
                   ? null
                   : _buildServerSwitchDrawer(),

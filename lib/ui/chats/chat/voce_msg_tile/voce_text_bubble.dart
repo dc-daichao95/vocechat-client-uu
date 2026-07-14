@@ -10,6 +10,7 @@ import 'package:vocechat_client/ui/app_colors.dart';
 
 class VoceTextBubble extends StatelessWidget {
   final ChatMsgM chatMsgM;
+  final bool isSelf;
 
   late final String _content;
 
@@ -20,7 +21,8 @@ class VoceTextBubble extends StatelessWidget {
 
   final int? maxLines;
 
-  VoceTextBubble({Key? key, required this.chatMsgM, this.maxLines})
+  VoceTextBubble(
+      {Key? key, required this.chatMsgM, this.isSelf = false, this.maxLines})
       : super(key: key) {
     _edited = chatMsgM.reactionData?.hasEditedText ?? false;
     _hasMention = chatMsgM.hasMention;
@@ -40,17 +42,20 @@ class VoceTextBubble extends StatelessWidget {
       }
     }
 
+    final baseColor = isSelf ? Colors.white : AppColors.coolGrey700;
     _normalStyle = TextStyle(
-        fontSize: 16,
-        color: AppColors.coolGrey700,
-        fontWeight: FontWeight.w400);
+        fontSize: 16, color: baseColor, fontWeight: FontWeight.w400);
     _mentionStyle = TextStyle(
-        fontSize: 16, color: AppColors.cyan500, fontWeight: FontWeight.w400);
+        fontSize: 16,
+        color: isSelf ? const Color(0xFFA7F3D0) : AppColors.cyan500,
+        fontWeight: FontWeight.w400);
   }
 
   @override
   Widget build(BuildContext context) {
     var children = <InlineSpan>[];
+    final linkColor =
+        isSelf ? const Color(0xFFA7F3D0) : AppColors.primaryBlue;
 
     _content.splitMapJoin(
       RegExp(urlRegEx, caseSensitive: false, dotAll: true),
@@ -60,7 +65,7 @@ class VoceTextBubble extends StatelessWidget {
         if (url != null && url.isNotEmpty) {
           children.add(TextSpan(
               text: url,
-              style: TextStyle(color: AppColors.primaryBlue),
+              style: TextStyle(color: linkColor),
               recognizer: TapGestureRecognizer()
                 ..onTap = () async {
                   String url0 = url;
@@ -115,17 +120,14 @@ class VoceTextBubble extends StatelessWidget {
     TextSpan textSpan = TextSpan(children: [
       TextSpan(
         children: children,
-        style: TextStyle(
-            fontSize: 16,
-            color: AppColors.coolGrey700,
-            fontWeight: FontWeight.w400),
+        style: _normalStyle,
       ),
       if (_edited)
         TextSpan(
             text: " (${AppLocalizations.of(context)!.edited})",
             style: TextStyle(
                 fontSize: 14,
-                color: AppColors.navLink,
+                color: isSelf ? const Color(0xFFD1FAE5) : AppColors.navLink,
                 fontWeight: FontWeight.w400))
     ]);
 

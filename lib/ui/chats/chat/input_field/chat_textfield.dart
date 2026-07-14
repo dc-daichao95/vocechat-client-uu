@@ -20,6 +20,7 @@ import 'package:vocechat_client/dao/init_dao/group_info.dart';
 import 'package:vocechat_client/dao/init_dao/user_info.dart';
 import 'package:vocechat_client/ui/app_colors.dart';
 import 'package:vocechat_client/ui/chats/chat/input_field/app_mentions.dart';
+import 'package:vocechat_client/ui/chats/chat/input_field/emoji_panel.dart';
 import 'package:voce_widgets/voce_widgets.dart';
 import 'package:vocechat_client/ui/chats/chat/input_field/voice_button.dart';
 import 'package:vocechat_client/ui/chats/chat/message_tile/image_bubble/image_bubble.dart';
@@ -135,7 +136,19 @@ class _ChatTextFieldState extends State<ChatTextField> {
         return ValueListenableBuilder<InputBarInfo>(
             valueListenable: inputBarInfoNotifier,
             builder: (context, info, _) {
-              return AppMentions(
+              return Focus(
+                onKeyEvent: (node, event) {
+                  if (event is! KeyDownEvent) {
+                    return KeyEventResult.ignored;
+                  }
+                  if (event.logicalKey == LogicalKeyboardKey.enter &&
+                      !HardwareKeyboard.instance.isShiftPressed) {
+                    _sendTxt();
+                    return KeyEventResult.handled;
+                  }
+                  return KeyEventResult.ignored;
+                },
+                child: AppMentions(
                 defaultText: info.draft,
                 key: widget.mentionsKey,
                 enableMention: widget.groupInfoMNotifier != null,
@@ -207,6 +220,15 @@ class _ChatTextFieldState extends State<ChatTextField> {
                                       padding: EdgeInsets.zero,
                                       onPressed: _sendFile,
                                       child: Icon(Icons.folder,
+                                          color: AppColors.grey800)),
+                                ),
+                                SizedBox(
+                                  width: widget._height,
+                                  height: widget._height,
+                                  child: CupertinoButton(
+                                      padding: EdgeInsets.zero,
+                                      onPressed: _pickEmoji,
+                                      child: Icon(Icons.emoji_emotions_outlined,
                                           color: AppColors.grey800)),
                                 ),
                               ],
@@ -347,6 +369,7 @@ class _ChatTextFieldState extends State<ChatTextField> {
                         );
                       })
                 ],
+              ),
               );
             });
       },
@@ -828,6 +851,23 @@ class _ChatTextFieldState extends State<ChatTextField> {
       }
     }
     return text;
+  }
+
+  void _pickEmoji() {
+    EmojiPanel.show(context, (emoji) {
+      final c = widget.mentionsKey.currentState?.controller;
+      if (c == null) return;
+      final text = c.text;
+      final sel = c.selection;
+      final start = sel.isValid ? sel.start : text.length;
+      final end = sel.isValid ? sel.end : text.length;
+      final next = text.replaceRange(start, end, emoji);
+      c.value = TextEditingValue(
+        text: next,
+        selection: TextSelection.collapsed(offset: start + emoji.length),
+      );
+      hasText.value = next.trim().isNotEmpty;
+    });
   }
 
   void _sendTxt() async {

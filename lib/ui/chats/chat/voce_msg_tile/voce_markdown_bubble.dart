@@ -7,12 +7,14 @@ import 'package:vocechat_client/ui/app_colors.dart';
 
 class VoceMdBubble extends StatelessWidget {
   final ChatMsgM chatMsgM;
+  final bool isSelf;
 
   late final String? _mdText;
 
   late final bool _edited;
 
-  VoceMdBubble({Key? key, required this.chatMsgM}) : super(key: key) {
+  VoceMdBubble({Key? key, required this.chatMsgM, this.isSelf = false})
+      : super(key: key) {
     _mdText = chatMsgM.msgNormal?.content ?? chatMsgM.msgReply?.content;
 
     _edited = chatMsgM.reactionData?.hasEditedText ?? false;
@@ -20,15 +22,18 @@ class VoceMdBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textColor = isSelf ? Colors.white : AppColors.coolGrey700;
     return Wrap(children: [
       MarkdownBody(
         data: _mdText ?? AppLocalizations.of(context)!.noContent,
         selectable: true,
         styleSheet: MarkdownStyleSheet(
+            p: TextStyle(
+                fontWeight: FontWeight.w400, fontSize: 14, color: textColor),
             a: TextStyle(
                 fontWeight: FontWeight.w400,
                 fontSize: 14,
-                color: AppColors.coolGrey700)),
+                color: isSelf ? const Color(0xFFA7F3D0) : AppColors.coolGrey700)),
         onTapLink: (text, url, title) {
           if (url != null) {
             SharedFuncs.appLaunchUrl(Uri.parse(url));
@@ -39,7 +44,7 @@ class VoceMdBubble extends StatelessWidget {
         Text(" (${AppLocalizations.of(context)!.edited})",
             style: TextStyle(
                 fontSize: 14,
-                color: AppColors.navLink,
+                color: isSelf ? const Color(0xFFD1FAE5) : AppColors.navLink,
                 fontWeight: FontWeight.w400))
     ]);
   }

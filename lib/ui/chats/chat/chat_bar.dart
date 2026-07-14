@@ -18,6 +18,8 @@ class ChatBar extends StatefulWidget implements PreferredSizeWidget {
   final ValueNotifier<UserInfoM>? userInfoNotifier;
 
   final VoidCallback onPop;
+  final bool hideBack;
+  final VoidCallback? onRefresh;
 
   late final bool _isGroup;
 
@@ -26,7 +28,9 @@ class ChatBar extends StatefulWidget implements PreferredSizeWidget {
       required this.onPop,
       this.groupInfoNotifier,
       required this.unreadCount,
-      this.userInfoNotifier})
+      this.userInfoNotifier,
+      this.hideBack = false,
+      this.onRefresh})
       : super(key: key) {
     assert((groupInfoNotifier == null) ^ (userInfoNotifier == null));
     if (groupInfoNotifier != null) {
@@ -55,8 +59,10 @@ class _ChatBarState extends State<ChatBar> {
         elevation: 0,
         backgroundColor: AppColors.barBg,
         titleSpacing: 0,
-        leadingWidth: 80,
-        leading: CupertinoButton(
+        leadingWidth: widget.hideBack ? 16 : 80,
+        leading: widget.hideBack
+            ? const SizedBox(width: 16)
+            : CupertinoButton(
             padding: EdgeInsets.only(left: 16, right: 4),
             onPressed: () {
               widget.onPop();
@@ -199,13 +205,11 @@ class _ChatBarState extends State<ChatBar> {
 
   List<Widget> _buildChannelActions(BuildContext context) {
     return [
-      // Builder(builder: (context) {
-      //   return CupertinoButton(
-      //       padding: EdgeInsets.zero,
-      //       onPressed: () => _startAudioCall(context),
-      //       child:
-      //           Icon(AppIcons.headphone, size: 20, color: AppColors.grey500));
-      // }),
+      if (widget.onRefresh != null)
+        CupertinoButton(
+            padding: EdgeInsets.zero,
+            onPressed: widget.onRefresh,
+            child: Icon(Icons.refresh, size: 20, color: AppColors.grey500)),
       CupertinoButton(
           padding: EdgeInsets.zero,
           onPressed: () async {
@@ -222,6 +226,11 @@ class _ChatBarState extends State<ChatBar> {
 
   List<Widget> _buildDmActions(BuildContext context) {
     return [
+      if (widget.onRefresh != null)
+        CupertinoButton(
+            padding: EdgeInsets.zero,
+            onPressed: widget.onRefresh,
+            child: Icon(Icons.refresh, size: 20, color: AppColors.grey500)),
       CupertinoButton(
           onPressed: () async {
             Navigator.push(

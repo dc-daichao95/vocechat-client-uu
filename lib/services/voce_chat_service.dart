@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
+import 'package:vocechat_client/api/lib/e2e_api.dart';
 import 'package:vocechat_client/api/lib/group_api.dart';
 import 'package:vocechat_client/api/lib/resource_api.dart';
 import 'package:vocechat_client/api/lib/user_api.dart';
@@ -35,6 +36,7 @@ import 'package:vocechat_client/main.dart';
 import 'package:vocechat_client/models/local_kits.dart';
 import 'package:vocechat_client/services/file_handler.dart';
 import 'package:vocechat_client/services/file_handler/audio_file_handler.dart';
+import 'package:vocechat_client/services/e2e_crypto.dart';
 import 'package:vocechat_client/services/persistent_connection/dio_sse.dart';
 import 'package:vocechat_client/services/persistent_connection/persistent_connection.dart';
 import 'package:vocechat_client/services/persistent_connection/sse.dart';
@@ -786,7 +788,27 @@ class VoceChatService {
     afterReady = true;
 
     App.app.statusService?.fireSseLoading(PersConnStatus.successful);
+    // Publish E2E identity once after history sync; peers use it for wraps / sk_dist.
+    // Incoming sk_dist in history is already applied via _decryptE2eInPlace.
+    unawaited(_bootstrapE2eIdentity());
     fireReady();
+  }
+
+  Future<void> _bootstrapE2eIdentity() async {
+    try {
+      final uid = App.app.userDb?.uid;
+      if (uid == null) return;
+      E2eCrypto.resetSessionDistFlags();
+      final id = await E2eCrypto.ensureIdentity(uid);
+      await E2eApi(App.app.chatServerM.fullUrl).putIdentity(
+        deviceId: id.deviceId,
+        identityKeyPub: id.publicKeySpkiB64,
+      );
+      App.logger
+          .info('E2E identity published for uid=$uid device=${id.deviceId}');
+    } catch (e) {
+      App.logger.warning('E2E identity bootstrap failed: $e');
+    }
   }
 
   void deleteMemoryMsgs() {
@@ -1601,13 +1623,31 @@ class VoceChatService {
 
   Future<void> _handleMsgNormal(ChatMsg chatMsg) async {
     String localMid;
-    if (chatMsg.fromUid == App.app.userDb!.uid) {
+    final isSelf = chatMsg.fromUid == App.app.userDb!.uid;
+    if (isSelf) {
       localMid = chatMsg.detail['properties']?['cid'] ?? uuid();
     } else {
       localMid = uuid();
     }
 
     try {
+      await _decryptE2eInPlace(chatMsg);
+      // Own outgoing: if decrypt failed, keep local plaintext optimistic row
+      // (HTTP success / optimistic UI) and only refresh mid/status.
+      final detail = chatMsg.detail;
+      final decryptFailed = detail['properties'] is Map &&
+          detail['properties']['e2e_decrypt_failed'] == true;
+      if (isSelf && decryptFailed) {
+        final existing = await ChatMsgDao().first(
+            where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
+        if (existing != null) {
+          existing.mid = chatMsg.mid;
+          existing.statusStr = MsgStatus.success.name;
+          await ChatMsgDao().update(existing);
+          App.app.chatService.fireMsg(existing, true);
+          return;
+        }
+      }
       ChatMsgM chatMsgM =
           ChatMsgM.fromMsg(chatMsg, localMid, MsgStatus.success);
       await cumulateMsg(chatMsgM);
@@ -1615,6 +1655,70 @@ class VoceChatService {
     } catch (e) {
       App.logger.severe(e);
     }
+  }
+
+  /// Decrypt vocechat/e2e envelopes before persist so tiles render as text/file.
+  Future<void> _decryptE2eInPlace(ChatMsg chatMsg) async {
+    final detail = chatMsg.detail;
+    final ct = detail['content_type'] as String?;
+    if (ct != typeE2e) return;
+
+    final myUid = App.app.userDb?.uid;
+    if (myUid == null) return;
+
+    final content = detail['content'] as String?;
+    if (content == null || content.isEmpty) return;
+
+    final props = Map<String, dynamic>.from(
+        (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
+
+    final dec = await E2eCrypto.decryptIncoming(uid: myUid, content: content);
+    if (dec == null) {
+      detail['content'] = '[Encrypted message — unable to decrypt]';
+      detail['content_type'] = typeText;
+      props['e2e'] = true;
+      props['e2e_decrypt_failed'] = true;
+      detail['properties'] = props;
+      return;
+    }
+
+    if (dec.kind == 'sk_dist') {
+      detail['content'] = dec.plaintext;
+      detail['content_type'] = typeText;
+      props['e2e'] = true;
+      props['e2e_sk_dist'] = true;
+      detail['properties'] = props;
+      return;
+    }
+
+    if (dec.kind == 'file' && dec.file != null) {
+      final f = dec.file!;
+      final path = (f['path'] ?? '') as String;
+      final name = (f['name'] ?? 'file') as String;
+      final mime = (f['mime'] ?? 'application/octet-stream') as String;
+      final size = f['size'] ?? 0;
+      detail['content'] = path;
+      detail['content_type'] = typeFile;
+      props['e2e'] = true;
+      props['inner_content_type'] = typeFile;
+      props['name'] = name;
+      props['size'] = size;
+      props['content_type'] = mime;
+      props['e2e_file_path'] = path;
+      if (f['fiv'] != null) props['e2e_file_fiv'] = f['fiv'];
+      if (dec.fileMk != null) {
+        props['e2e_file_mk'] = base64Encode(dec.fileMk!);
+      }
+      detail['properties'] = props;
+      return;
+    }
+
+    final inner = (props['inner_content_type'] as String?) ?? typeText;
+    detail['content'] = dec.plaintext;
+    detail['content_type'] =
+        (inner == typeMarkdown) ? typeMarkdown : typeText;
+    props['e2e'] = true;
+    detail['properties'] = props;
   }
 
   Future<void> cumulateMsg(ChatMsgM chatMsgM) async {
