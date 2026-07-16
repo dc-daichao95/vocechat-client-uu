@@ -906,9 +906,7 @@ class VoceChatService {
         // Fall back to v1 publish if protocol endpoint unavailable.
       }
 
-      if (protocolVer >= 2) {
-        await E2eV2Identity.bootstrapAndPublish(uid);
-      } else {
+      if (protocolVer < 2) {
         final id = await E2eCrypto.ensureIdentity(uid);
         await E2eApi(App.app.chatServerM.fullUrl).putIdentity(
           deviceId: id.deviceId,
@@ -916,6 +914,14 @@ class VoceChatService {
         );
         App.logger
             .info('E2E v1 identity published for uid=$uid device=${id.deviceId}');
+      }
+
+      // Publish v2 last so /bundle prefers the SPK-capable device.
+      try {
+        await E2eV2Identity.bootstrapAndPublish(uid);
+      } catch (e) {
+        if (protocolVer >= 2) rethrow;
+        App.logger.warning('E2E v2 identity publish skipped: $e');
       }
     } catch (e) {
       App.logger.warning('E2E identity bootstrap failed: $e');
@@ -1816,7 +1822,12 @@ class VoceChatService {
     try {
       final detail = Map<String, dynamic>.from(json.decode(chatMsgM.detail));
       final ok =
-          await E2eCrypto.rewriteDetailInPlace(uid: myUid, detail: detail)
+          await E2eCrypto.rewriteDetailInPlace(
+            uid: myUid,
+            detail: detail,
+            peerUid: chatMsgM.dmUid > 0 ? chatMsgM.dmUid : null,
+            fromUid: chatMsgM.fromUid,
+          )
               .timeout(const Duration(seconds: 5), onTimeout: () => false);
       if (!ok) return;
       chatMsgM.detail = json.encode(detail);
@@ -1886,7 +1897,12 @@ class VoceChatService {
 
         final detail = Map<String, dynamic>.from(detailMap);
         final ok =
-            await E2eCrypto.rewriteDetailInPlace(uid: myUid, detail: detail);
+            await E2eCrypto.rewriteDetailInPlace(
+              uid: myUid,
+              detail: detail,
+              peerUid: m.dmUid > 0 ? m.dmUid : null,
+              fromUid: m.fromUid,
+            );
         if (!ok) continue;
 
         m.detail = json.encode(detail);
@@ -1926,7 +1942,11 @@ class VoceChatService {
           if (local == null) continue;
           if (chatMsg.detail['content_type'] != typeE2e) continue;
           await E2eCrypto.rewriteDetailInPlace(
-              uid: myUid, detail: chatMsg.detail);
+            uid: myUid,
+            detail: chatMsg.detail,
+            peerUid: local.dmUid > 0 ? local.dmUid : null,
+            fromUid: local.fromUid,
+          );
           local.detail = json.encode(chatMsg.detail);
           await ChatMsgDao().update(local);
           fireMsg(local, true, snippetOnly: true);

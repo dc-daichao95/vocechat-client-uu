@@ -56,21 +56,29 @@ class E2eV2Identity {
       public = Map<String, dynamic>.from(map['public'] as Map);
     }
 
-    final spk = core.generateSignedPrekey(
-      secretX25519B64: secret['secret_x25519_b64'] as String,
-      secretEd25519B64: secret['secret_ed25519_b64'] as String,
-      keyId: 1,
-    );
-    final spkPublic = Map<String, dynamic>.from(spk['public'] as Map);
-
-    // Store SPK secret for later X3DH responder use.
-    await _secure.write(
-      key: 'e2e_v2_spk:$uid:$did',
-      value: jsonEncode({
-        'secret_b64': spk['secret_b64'],
-        'public': spkPublic,
-      }),
-    );
+    Map<String, dynamic> spkPublic;
+    String spkSecretB64;
+    final existingSpk = await _secure.read(key: 'e2e_v2_spk:$uid:$did');
+    if (existingSpk != null) {
+      final map = jsonDecode(existingSpk) as Map<String, dynamic>;
+      spkSecretB64 = map['secret_b64'] as String;
+      spkPublic = Map<String, dynamic>.from(map['public'] as Map);
+    } else {
+      final spk = core.generateSignedPrekey(
+        secretX25519B64: secret['secret_x25519_b64'] as String,
+        secretEd25519B64: secret['secret_ed25519_b64'] as String,
+        keyId: 1,
+      );
+      spkPublic = Map<String, dynamic>.from(spk['public'] as Map);
+      spkSecretB64 = spk['secret_b64'] as String;
+      await _secure.write(
+        key: 'e2e_v2_spk:$uid:$did',
+        value: jsonEncode({
+          'secret_b64': spkSecretB64,
+          'public': spkPublic,
+        }),
+      );
+    }
 
     // Server identity_key_pub: JSON of DH+sig pubs (v2 wire).
     final identityKeyPub = jsonEncode(public);

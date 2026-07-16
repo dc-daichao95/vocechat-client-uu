@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pointycastle/export.dart' as pc;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vocechat_client/app_consts.dart';
+import 'package:vocechat_client/services/e2e_v2_dm.dart';
 
 /// E2E v1 aligned with Web: P-256 ECDH + AES-GCM (DM) and channel sender keys.
 class E2eCrypto {
@@ -402,6 +403,8 @@ class E2eCrypto {
   static Future<bool> rewriteDetailInPlace({
     required int uid,
     required Map detail,
+    int? peerUid,
+    int? fromUid,
   }) async {
     final ct = detail['content_type'] as String?;
     final props = Map<String, dynamic>.from(
@@ -415,7 +418,13 @@ class E2eCrypto {
     }
     if (envelope == null || envelope.isEmpty) return false;
 
-    final dec = await decryptIncoming(uid: uid, content: envelope);
+    final dec = await decryptIncoming(
+      uid: uid,
+      content: envelope,
+      peerUid: peerUid,
+      fromUid: fromUid,
+      localId: props['local_id'],
+    );
     if (dec == null) {
       detail['content'] = envelope;
       detail['content_type'] = typeE2e;
@@ -585,9 +594,25 @@ class E2eCrypto {
       })?> decryptIncoming({
     required int uid,
     required String content,
+    int? peerUid,
+    int? fromUid,
+    Object? localId,
   }) async {
     try {
       final env = _unpack(content);
+      if (env['v'] == 2 && env['alg'] == 'DR+AES-GCM') {
+        final sessionPeer = (fromUid != null && fromUid == uid)
+            ? (peerUid ?? 0)
+            : (fromUid ?? peerUid ?? 0);
+        final pt = await E2eV2Dm.decryptText(
+          uid: uid,
+          peerUid: sessionPeer,
+          content: content,
+          localId: localId,
+        );
+        if (pt == null) return null;
+        return (kind: 'text', plaintext: pt, file: null, fileMk: null);
+      }
       if (env['v'] != 1) return null;
       final alg = env['alg'] as String?;
       final priv = await _loadKeyPair(uid);

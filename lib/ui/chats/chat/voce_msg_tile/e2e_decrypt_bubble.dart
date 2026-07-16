@@ -92,7 +92,12 @@ class _E2eDecryptBubbleState extends State<E2eDecryptBubble> {
     }
 
     final detail = Map<String, dynamic>.from(json.decode(widget.chatMsgM.detail));
-    final ok = await E2eCrypto.rewriteDetailInPlace(uid: uid, detail: detail);
+    final ok = await E2eCrypto.rewriteDetailInPlace(
+      uid: uid,
+      detail: detail,
+      peerUid: widget.chatMsgM.dmUid > 0 ? widget.chatMsgM.dmUid : null,
+      fromUid: widget.chatMsgM.fromUid,
+    );
     if (!mounted) return;
 
     if (!ok) {

@@ -13,6 +13,7 @@ import 'package:vocechat_client/api/lib/message_api.dart';
 import 'package:vocechat_client/api/lib/resource_api.dart';
 import 'package:vocechat_client/api/lib/user_api.dart';
 import 'package:vocechat_client/services/e2e_crypto.dart';
+import 'package:vocechat_client/services/e2e_v2_dm.dart';
 import 'package:vocechat_client/api/models/msg/chat_msg.dart';
 import 'package:vocechat_client/api/models/msg/msg_normal.dart';
 import 'package:vocechat_client/api/models/msg/msg_reply.dart';
@@ -126,29 +127,83 @@ class VoceSendService {
       final enabled = dm.data is! Map || dm.data['e2e_enabled'] != false;
       if (enabled) {
         e2eRequired = true;
-        var recipients = await _collectIdentityPubs(e2eApi, [myUid, uid]);
-        if (recipients.isEmpty) {
-          final bundle = await e2eApi.getBundle(uid);
-          final peerPub = (bundle.data as Map)['identity_key_pub'] as String?;
-          if (peerPub != null && peerPub.isNotEmpty) {
-            recipients = [(uid: uid, identityKeyPub: peerPub)];
+
+        // Prefer Double Ratchet when local + peer v2 material is ready.
+        try {
+          if (await E2eV2Dm.canUse(myUid)) {
+            final ids = await e2eApi.getIdentity(uid);
+            Map? v2Id;
+            if (ids.statusCode == 200 && ids.data is List) {
+              for (final row in ids.data as List) {
+                if (row is Map &&
+                    row['signed_prekey_pub'] != null &&
+                    '${row['signed_prekey_pub']}'.isNotEmpty) {
+                  v2Id = row;
+                  break;
+                }
+              }
+            }
+            if (v2Id != null) {
+              final bundle = await e2eApi.getBundle(
+                uid,
+                deviceId: v2Id['device_id'] as String?,
+              );
+              if (bundle.statusCode == 200 &&
+                  bundle.data is Map &&
+                  E2eV2Dm.peerSupportsV2(bundle.data as Map)) {
+                final enc = await E2eV2Dm.encryptText(
+                  uid: myUid,
+                  peerUid: uid,
+                  plaintext: content,
+                  bundle: Map<String, dynamic>.from(bundle.data as Map),
+                );
+                if (enc != null) {
+                  wireContent = enc.content;
+                  wireType = typeE2e;
+                  props = {...enc.properties, "cid": localMid};
+                  e2eRequired = true;
+                }
+              }
+            }
           }
+        } catch (e) {
+          App.logger.warning('E2E v2 DM encrypt fallback to v1: $e');
         }
-        final self = await E2eCrypto.ensureIdentity(myUid);
-        if (!recipients.any((r) => r.identityKeyPub == self.publicKeySpkiB64)) {
-          recipients = [
-            ...recipients,
-            (uid: myUid, identityKeyPub: self.publicKeySpkiB64)
-          ];
+
+        if (wireType != typeE2e) {
+          var recipients = await _collectIdentityPubs(e2eApi, [myUid, uid]);
+          if (recipients.isEmpty) {
+            final bundle = await e2eApi.getBundle(uid);
+            final peerPub = (bundle.data as Map)['identity_key_pub'] as String?;
+            if (peerPub != null && peerPub.isNotEmpty) {
+              recipients = [(uid: uid, identityKeyPub: peerPub)];
+            }
+          }
+          // Skip v2 JSON pubs on the v1 ECDH path.
+          recipients = recipients.where((r) {
+            try {
+              jsonDecode(r.identityKeyPub);
+              return false;
+            } catch (_) {
+              return true;
+            }
+          }).toList();
+          final self = await E2eCrypto.ensureIdentity(myUid);
+          if (!recipients.any((r) => r.identityKeyPub == self.publicKeySpkiB64)) {
+            recipients = [
+              ...recipients,
+              (uid: myUid, identityKeyPub: self.publicKeySpkiB64)
+            ];
+          }
+          final enc = await E2eCrypto.encryptTextForPeer(
+            uid: myUid,
+            plaintext: content,
+            recipients: recipients,
+          );
+          wireContent = enc.content;
+          wireType = typeE2e;
+          props = {...enc.properties, "cid": localMid};
         }
-        final enc = await E2eCrypto.encryptTextForPeer(
-          uid: myUid,
-          plaintext: content,
-          recipients: recipients,
-        );
-        wireContent = enc.content;
-        wireType = typeE2e;
-        props = {...enc.properties, "cid": localMid};
       }
     } catch (e) {
       App.logger.severe("E2E encrypt failed: $e");
