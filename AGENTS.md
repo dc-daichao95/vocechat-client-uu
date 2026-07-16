@@ -16,7 +16,9 @@
 ## 2. 当前事实与验证边界
 - 本项目是 VoceChat 自托管服务器的 Flutter 移动客户端。
 - 本仓库按独立 fork 维护，不假定与其他 VoceChat client 仓库自动同步；这是用户治理决策，不是 Git 可证明事实。
-- 支持范围仅为 Android 和 iOS；MUST NOT 默认扩展到 Web 或桌面平台。
+- 产品目标平台为 **Android、iOS、Windows**（Flutter）；MUST NOT 默认扩展到 Web 或 Linux/macOS 桌面，除非用户另行批准。
+- **构建优先级（用户 2026-07-13）**：先打通 **Windows** 与 **Android** 可复现构建；iOS 在 macOS Runner 可用后再作为合并门禁。旧文「仅 Android/iOS」叙述以本条为准废止。
+- 跨端 E2E 协议契约以 `vocechat-web-uu/docs/E2E_ENCRYPTION_DESIGN.md` 为源；本仓副本见 [`docs/E2E_ENCRYPTION_DESIGN.md`](docs/E2E_ENCRYPTION_DESIGN.md)。E2E 未 Accepted 前 MUST NOT 写生产加密代码。
 - 当前应用版本为 `0.2.113+83`。
 - 当前 Dart SDK 约束为 `>=2.17.0 <3.0.0`。
 - 仓库未固定精确 Flutter SDK 版本，也未提供完整可复现工具链基线。
@@ -306,7 +308,7 @@
 
 - Agora 保留 API / model / UI 脚手架，但入口被注释、Agora RTC SDK 未安装、运行能力未验证；路线已延后。
 - MUST NOT 在 P0 / P1 或无关功能中顺带完成 Agora。
-- 产品支持范围仅 Android / iOS，不为其他平台承诺兼容。
+- 产品支持范围：Android / iOS / Windows；构建与门禁按「Win+Android 优先，iOS 随后」执行，不为 Linux/macOS 桌面或 Web 承诺兼容。
 - 路线顺序 MUST 保持：稳定与安全基线 → 渐进升级 → 功能开发。
 - 当前仅 P0 可实施；P1 仅可调研、设计、兼容性 spike，P0 验收后才可实施。
 - P2 功能仅可调研和设计，P0、P1 均验收后才可实施；各阶段 MUST NOT 提前进入生产代码或形成可合并 PR。
@@ -318,3 +320,4 @@
 
 - 项目入口与当前状态：[`README.md`](README.md)
 - 审计证据、风险和路线：[`docs/PROJECT_REPORT.md`](docs/PROJECT_REPORT.md)
+- 跨端 E2E 对齐（Draft，未批准实现）：[`docs/E2E_ENCRYPTION_DESIGN.md`](docs/E2E_ENCRYPTION_DESIGN.md)

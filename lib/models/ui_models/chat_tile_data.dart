@@ -177,6 +177,11 @@ class ChatTileData {
     }
     String snippet;
 
+    // Pending E2E envelopes map to text content_type but body is ciphertext.
+    if (chatMsgM.isE2ePendingMsg) {
+      return "[Encrypted message]";
+    }
+
     switch (chatMsgM.detailType) {
       case MsgDetailType.normal:
         switch (chatMsgM.detailContentType) {
@@ -186,6 +191,10 @@ class ChatTileData {
                 : chatMsgM.msgNormal?.content ??
                     chatMsgM.msgReply?.content ??
                     "";
+            // Guard: long base64-looking blobs after partial decrypt paths.
+            if (snippet.length > 120 && !snippet.contains(' ')) {
+              snippet = "[Encrypted message]";
+            }
             break;
           case MsgContentType.markdown:
             snippet =

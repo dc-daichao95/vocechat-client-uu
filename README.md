@@ -1,25 +1,26 @@
 # VoceChat Mobile Client
 
-VoceChat 自托管服务器的 Flutter 移动客户端。
+VoceChat 自托管服务器的 Flutter 客户端。
 
-本仓库仅面向 **Android / iOS**，不支持 Web、Windows、Linux 或 macOS 桌面端；
+本仓库面向 **Android / iOS / Windows**（构建优先级：Windows + Android 先打通；iOS 需 macOS）。
 项目按独立 fork 维护，不假定与其他 VoceChat client 仓库自动同步。
 
 ## 项目状态
 - 应用版本：`0.2.113+83`
-- Dart SDK 约束：`>=2.17.0 <3.0.0`
-- 支持平台：Android、iOS
+- Dart SDK 约束：`>=2.17.0 <3.0.0`（本机验证基线见 `docs/DART3_BUILD_RUNBOOK.md`：Flutter 3.19.6）
+- 支持平台：Android、iOS、Windows
 - 实时连接：当前使用 SSE；WebSocket 路径已停用
 - 维护顺序：**稳定与安全基线 → 渐进升级 → 功能开发**
 - Agora：仅保留 API / model / UI 占位，Agora RTC SDK 未安装，延后评估且不进入当前主路径
+- E2E 加密：仅协议契约文档（`docs/E2E_ENCRYPTION_DESIGN.md`）；**Flutter 客户端尚未实现**（Web/Server MVP 已落地）
 - 状态管理：`provider` 已声明但静态未发现运行时使用；Riverpod 未安装、尚未迁移，仅作为渐进目标
 
-仓库没有固定 Flutter SDK 版本，也没有提供可复现的完整工具链基线。
-请根据 Dart 约束和现有插件选择兼容的 Flutter / Dart 环境，不要把未经验证的版本当作项目要求。
+## 本机构建验证（2026-07-13 / 2026-07-14）
+- Android debug：`build\app\outputs\flutter-apk\app-debug.apk` — PASS
+- Android release：`build\app\outputs\flutter-apk\app-release.apk` — PASS（临时测试 keystore，非生产）
+- Windows release：`build\windows\x64\runner\Release\vocechat_client.exe` — PASS（需 VS「使用 C++ 的桌面开发」含 CMake）
 
-当前 Windows PowerShell 会话无法从 `PATH` 解析 `flutter`、`dart` 或 `java`。
-因此 `format`、`analyze`、`test`、代码生成以及 Android / iOS 构建均未在本次审计中执行；
-下文命令是**预期工作流，需在基线恢复后验证**，不能视为已经通过。
+工具链入口：`. C:\devtools\env319.ps1`（详见 runbook）。
 
 ## 文档入口
 - [AGENTS.md](AGENTS.md)：仓库协作规则、变更边界和 Agent / 开发者执行约束。

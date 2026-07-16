@@ -185,6 +185,13 @@ class E2eCrypto {
     return bytes;
   }
 
+  /// Bumped when identity/sk keys change so UI can retry decrypt (like Web).
+  static final ValueNotifier<int> keysEpoch = ValueNotifier(0);
+
+  static void notifyKeysUpdated() {
+    keysEpoch.value = keysEpoch.value + 1;
+  }
+
   static Future<({String publicKeySpkiB64, String deviceId})> ensureIdentity(
       int uid) async {
     final deviceId = await getOrCreateDeviceId();
@@ -193,12 +200,40 @@ class E2eCrypto {
     if (privB64 != null && pubB64 != null) {
       return (publicKeySpkiB64: pubB64, deviceId: deviceId);
     }
+    // Recover public key from private if pub half was lost (avoid silent rotate).
+    if (privB64 != null && pubB64 == null) {
+      try {
+        final d = base64Decode(privB64);
+        final pubUncompressed = _pubFromPrivD(d);
+        final pubSpkiB = base64Encode(_toSpki(pubUncompressed));
+        await _storeWrite(_pubKey(uid, deviceId), pubSpkiB);
+        notifyKeysUpdated();
+        return (publicKeySpkiB64: pubSpkiB, deviceId: deviceId);
+      } catch (e) {
+        debugPrint('E2E recover pub from priv failed: $e');
+      }
+    }
+    if (pubB64 != null && privB64 == null) {
+      debugPrint(
+          'E2E private key missing for uid=$uid — regenerating (old wraps may fail)');
+    }
     final kp = _generateP256KeyPair();
     final pubSpkiB = base64Encode(_toSpki(kp.pubUncompressed));
     final privB = base64Encode(kp.d);
     await _storeWrite(_privKey(uid, deviceId), privB);
     await _storeWrite(_pubKey(uid, deviceId), pubSpkiB);
+    notifyKeysUpdated();
     return (publicKeySpkiB64: pubSpkiB, deviceId: deviceId);
+  }
+
+  static Uint8List _pubFromPrivD(Uint8List dBytes) {
+    final d = _bytesToBigInt(dBytes);
+    final q = _p256.G * d;
+    return Uint8List.fromList([
+      0x04,
+      ..._bigIntToFixed(q!.x!.toBigInteger()!, 32),
+      ..._bigIntToFixed(q.y!.toBigInteger()!, 32),
+    ]);
   }
 
   static Future<EcKeyPair> _loadKeyPair(int uid) async {
@@ -358,6 +393,78 @@ class E2eCrypto {
     final prefs = await SharedPreferences.getInstance();
     await _storeWrite(_skKey(gid, skid), base64Encode(raw));
     await prefs.setString(_skActive(gid), skid);
+    notifyKeysUpdated();
+  }
+
+  /// Rewrite a message [detail] map in-place when decrypt succeeds.
+  /// On failure keeps [typeE2e] + original envelope (never bake permanent text).
+  /// Returns true if plaintext/file was applied.
+  static Future<bool> rewriteDetailInPlace({
+    required int uid,
+    required Map detail,
+  }) async {
+    final ct = detail['content_type'] as String?;
+    final props = Map<String, dynamic>.from(
+        (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
+
+    String? envelope;
+    if (ct == typeE2e) {
+      envelope = detail['content'] as String?;
+    } else if (props['e2e_envelope'] is String) {
+      envelope = props['e2e_envelope'] as String;
+    }
+    if (envelope == null || envelope.isEmpty) return false;
+
+    final dec = await decryptIncoming(uid: uid, content: envelope);
+    if (dec == null) {
+      detail['content'] = envelope;
+      detail['content_type'] = typeE2e;
+      props['e2e'] = true;
+      props['e2e_decrypt_failed'] = true;
+      props['e2e_envelope'] = envelope;
+      detail['properties'] = props;
+      return false;
+    }
+
+    props.remove('e2e_decrypt_failed');
+    props.remove('e2e_envelope');
+    props['e2e'] = true;
+
+    if (dec.kind == 'sk_dist') {
+      detail['content'] = dec.plaintext;
+      detail['content_type'] = typeText;
+      props['e2e_sk_dist'] = true;
+      detail['properties'] = props;
+      return true;
+    }
+
+    if (dec.kind == 'file' && dec.file != null) {
+      final f = dec.file!;
+      final path = (f['path'] ?? '') as String;
+      final name = (f['name'] ?? 'file') as String;
+      final mime = (f['mime'] ?? 'application/octet-stream') as String;
+      final size = f['size'] ?? 0;
+      detail['content'] = path;
+      detail['content_type'] = typeFile;
+      props['inner_content_type'] = typeFile;
+      props['name'] = name;
+      props['size'] = size;
+      props['content_type'] = mime;
+      props['e2e_file_path'] = path;
+      if (f['fiv'] != null) props['e2e_file_fiv'] = f['fiv'];
+      if (dec.fileMk != null) {
+        props['e2e_file_mk'] = base64Encode(dec.fileMk!);
+      }
+      detail['properties'] = props;
+      return true;
+    }
+
+    final inner = (props['inner_content_type'] as String?) ?? typeText;
+    detail['content'] = dec.plaintext;
+    detail['content_type'] =
+        (inner == typeMarkdown) ? typeMarkdown : typeText;
+    detail['properties'] = props;
+    return true;
   }
 
   /// Channel text: user-granularity MK wraps for all member devices (no sk_dist).

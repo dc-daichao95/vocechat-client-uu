@@ -88,6 +88,44 @@ class UserApi {
     return newRes;
   }
 
+  Future<Response<int>> sendE2eMsg(
+      int uid, String content, Map<String, dynamic> properties) async {
+    final dio = DioUtil.token(baseUrl: _baseUrl);
+    dio.options.headers["x-properties"] =
+        base64.encode(utf8.encode(json.encode(properties)));
+    dio.options.headers["content-type"] = typeE2e;
+
+    Map<String, dynamic> refererHeader = {
+      'referer': App.app.chatServerM.fullUrl
+    };
+    if (App.app.chatServerM.url == "dev.voce.chat") {
+      refererHeader = {'referer': "https://privoce.voce.chat"};
+    }
+    dio.options.headers.addAll(refererHeader);
+
+    final res = await dio.post(
+      "/$uid/send",
+      data: content,
+      options: Options(
+          contentType: typeE2e,
+          headers: Map<String, dynamic>.from(dio.options.headers)),
+    );
+
+    var newRes = Response<int>(
+        headers: res.headers,
+        requestOptions: res.requestOptions,
+        isRedirect: res.isRedirect,
+        statusCode: res.statusCode,
+        statusMessage: res.statusMessage,
+        redirects: res.redirects,
+        extra: res.extra);
+
+    if (res.statusCode == 200 && res.data != null) {
+      newRes.data = res.data! as int;
+    }
+    return newRes;
+  }
+
   Future<Response<int>> sendMarkdownMsg(
       int dmUid, String msg, String cid) async {
     final dio = DioUtil.token(baseUrl: _baseUrl);
@@ -244,7 +282,10 @@ class UserApi {
   /// `GET /api/user/{uid}/history?limit=&before=`. If the server does not
   /// support it, callers should treat a non-200 response as "no history".
   Future<Response> getHistory(int uid, int? beforeMid,
-      {int limit = 20, bool enableRetry = false}) async {
+      {int limit = 20,
+      bool enableRetry = false,
+      int? afterTs,
+      int? beforeTs}) async {
     final dio = DioUtil.token(baseUrl: _baseUrl, enableRetry: enableRetry);
 
     String url = "/$uid/history?limit=$limit";
@@ -252,7 +293,24 @@ class UserApi {
     if (beforeMid != null) {
       url += "&before=$beforeMid";
     }
+    if (afterTs != null) {
+      url += "&after_ts=$afterTs";
+    }
+    if (beforeTs != null) {
+      url += "&before_ts=$beforeTs";
+    }
 
+    return dio.get(url);
+  }
+
+  /// Global time-window search across the current user's messages.
+  Future<Response> searchMessagesByTime(
+      {required int afterTs, required int beforeTs, String? q, int limit = 100}) async {
+    final dio = DioUtil.token(baseUrl: _baseUrl);
+    var url = "/messages/by_time?after_ts=$afterTs&before_ts=$beforeTs&limit=$limit";
+    if (q != null && q.trim().isNotEmpty) {
+      url += "&q=${Uri.encodeQueryComponent(q.trim())}";
+    }
     return dio.get(url);
   }
 

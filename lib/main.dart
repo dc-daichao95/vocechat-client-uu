@@ -22,9 +22,13 @@ import 'package:vocechat_client/event_bus_objects/push_to_chat_event.dart';
 import 'package:vocechat_client/firebase_options.dart';
 import 'package:vocechat_client/globals.dart';
 import 'package:vocechat_client/services/auth_service.dart';
+import 'package:vocechat_client/services/connectivity_policy.dart';
 import 'package:vocechat_client/services/db.dart';
+import 'package:vocechat_client/services/msg_notification_service.dart';
 import 'package:vocechat_client/services/persistent_connection/web_socket.dart';
 import 'package:vocechat_client/services/status_service.dart';
+import 'package:vocechat_client/services/taskbar_badge_service.dart';
+import 'package:vocechat_client/services/unread_count_service.dart';
 import 'package:vocechat_client/services/voce_chat_service.dart';
 import 'package:vocechat_client/shared_funcs.dart';
 import 'package:vocechat_client/ui/app_colors.dart';
@@ -38,55 +42,82 @@ final navigatorKey = GlobalKey<NavigatorState>();
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await _setUpFirebaseNotification();
+  try {
+    await MsgNotificationService.instance.init();
+  } catch (e, st) {
+    debugPrint("Local notification init skipped: $e\n$st");
+  }
+
+  try {
+    await _setUpFirebaseNotification();
+  } catch (e, st) {
+    // Desktop / missing Firebase options must not block UI startup.
+    debugPrint("Firebase setup skipped: $e\n$st");
+  }
 
   App.logger.setLevel(Level.CONFIG, includeCallerInfo: true);
 
-  await initDb();
-
   Widget defaultHome = ChatsMainPage();
+  try {
+    await initDb();
 
-  // await SharedFuncs.readCustomConfigs();
-
-  // Handling login status
-  final status = await StatusMDao.dao.getStatus();
-  if (status == null) {
-    defaultHome = await SharedFuncs.getDefaultHomePage();
-  } else {
-    final userDb = await UserDbMDao.dao.getUserDbById(status.userDbId);
-    if (userDb == null) {
+    // Handling login status
+    final status = await StatusMDao.dao.getStatus();
+    if (status == null) {
       defaultHome = await SharedFuncs.getDefaultHomePage();
     } else {
-      App.app.userDb = userDb;
-      await initCurrentDb(App.app.userDb!.dbName);
-
-      if (userDb.loggedIn != 1) {
-        // Sse.sse.close();
-        VoceWebSocket().close();
+      final userDb = await UserDbMDao.dao.getUserDbById(status.userDbId);
+      if (userDb == null) {
         defaultHome = await SharedFuncs.getDefaultHomePage();
       } else {
-        final chatServerM =
-            await ChatServerDao.dao.getServerById(userDb.chatServerId);
-        if (chatServerM == null) {
+        App.app.userDb = userDb;
+        await initCurrentDb(App.app.userDb!.dbName);
+
+        if (userDb.loggedIn != 1) {
+          // Sse.sse.close();
+          VoceWebSocket().close();
           defaultHome = await SharedFuncs.getDefaultHomePage();
         } else {
-          App.app.chatServerM = chatServerM;
+          final chatServerM =
+              await ChatServerDao.dao.getServerById(userDb.chatServerId);
+          if (chatServerM == null) {
+            defaultHome = await SharedFuncs.getDefaultHomePage();
+          } else {
+            App.app.chatServerM = chatServerM;
 
-          App.app.statusService = StatusService();
-          App.app.authService = AuthService(chatServerM: App.app.chatServerM);
-          App.app.chatService = VoceChatService();
+            App.app.statusService = StatusService();
+            App.app.authService = AuthService(chatServerM: App.app.chatServerM);
+            App.app.chatService = VoceChatService();
+            UnreadCountService.instance.startListening();
+          }
         }
       }
     }
+  } catch (e, st) {
+    // Never block first frame / window show on desktop.
+    debugPrint("Startup DB/auth init failed: $e\n$st");
+    try {
+      defaultHome = await SharedFuncs.getDefaultHomePage();
+    } catch (_) {}
   }
 
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp])
-      .then((value) {
-    runApp(VoceChatApp(defaultHome: defaultHome));
-  });
+  // setPreferredOrientations can hang / never complete on desktop.
+  if (defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS) {
+    await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  }
+  runApp(VoceChatApp(defaultHome: defaultHome));
 }
 
 Future<void> _setUpFirebaseNotification() async {
+  // FCM / firebase_options are only configured for Android & iOS.
+  if (kIsWeb ||
+      defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.linux ||
+      defaultTargetPlatform == TargetPlatform.macOS) {
+    return;
+  }
+
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
@@ -161,14 +192,35 @@ class _VoceChatAppState extends State<VoceChatApp> with WidgetsBindingObserver {
 
     _connectivitySubscription =
         _connectivity.onConnectivityChanged.listen(_updateConnectionStatus);
+    // Connectivity streams are change notifications and need not emit an
+    // initial value. Always establish realtime once startup has completed.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_connect());
+      // windows_taskbar rejects overlay calls while the native window is not
+      // visible. Initialize after the first frame so the initial unread count
+      // is actually applied instead of being lost during startup.
+      unawaited(
+          Future<void>.delayed(const Duration(milliseconds: 300), () async {
+        try {
+          await TaskbarBadgeService.instance.init();
+        } catch (e, st) {
+          debugPrint("Taskbar badge init skipped: $e\n$st");
+        }
+      }));
+    });
 
     _initLocale();
 
     _handleIncomingUniLink();
     _handleInitUniLink();
 
-    _handleInitialNotification();
-    _setupForegroundNotification();
+    // FCM is mobile-only; calling FirebaseMessaging on Windows crashes.
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      _handleInitialNotification();
+      _setupForegroundNotification();
+    }
   }
 
   @override
@@ -184,6 +236,10 @@ class _VoceChatAppState extends State<VoceChatApp> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         App.logger.info('App lifecycle: app resumed');
+        MsgNotificationService.instance.appInForeground = true;
+        UnreadCountService.instance.startListening();
+        unawaited(UnreadCountService.instance.recompute());
+        unawaited(TaskbarBadgeService.instance.refresh());
 
         onResume();
 
@@ -192,16 +248,25 @@ class _VoceChatAppState extends State<VoceChatApp> with WidgetsBindingObserver {
         break;
       case AppLifecycleState.paused:
         App.logger.info('App lifecycle: app paused');
+        MsgNotificationService.instance.appInForeground = false;
 
         shouldRefresh = true;
 
         break;
       case AppLifecycleState.inactive:
         App.logger.info('App lifecycle: app inactive');
+        // Windows minimize / lose focus — allow OS toasts + badge updates.
+        MsgNotificationService.instance.appInForeground = false;
+        break;
+      case AppLifecycleState.hidden:
+        App.logger.info('App lifecycle: app hidden');
+        MsgNotificationService.instance.appInForeground = false;
+        shouldRefresh = true;
         break;
       case AppLifecycleState.detached:
       default:
         App.logger.info('App lifecycle: app detached');
+        MsgNotificationService.instance.appInForeground = false;
 
         shouldRefresh = true;
 
@@ -420,9 +485,7 @@ class _VoceChatAppState extends State<VoceChatApp> with WidgetsBindingObserver {
 
   Future<void> _updateConnectionStatus(ConnectivityResult result) async {
     App.logger.info("Connectivity: $result");
-    if (result == ConnectivityResult.wifi ||
-        result == ConnectivityResult.mobile ||
-        result == ConnectivityResult.none) {
+    if (shouldConnectForConnectivity(result)) {
       await _connect();
     }
   }

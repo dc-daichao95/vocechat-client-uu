@@ -25,6 +25,7 @@ import 'package:vocechat_client/ui/chats/chat/voce_msg_tile/voce_archive_bubble.
 import 'package:vocechat_client/ui/chats/chat/voce_msg_tile/voce_file_bubble.dart';
 import 'package:vocechat_client/ui/chats/chat/voce_msg_tile/voce_markdown_bubble.dart';
 import 'package:vocechat_client/ui/chats/chat/voce_msg_tile/voce_reply_bubble.dart';
+import 'package:vocechat_client/ui/chats/chat/voce_msg_tile/e2e_decrypt_bubble.dart';
 import 'package:vocechat_client/ui/chats/chat/voce_msg_tile/voce_text_bubble.dart';
 import 'package:vocechat_client/ui/chats/chat/voce_msg_tile/voce_video_bubble.dart';
 import 'package:vocechat_client/ui/widgets/avatar/voce_avatar_size.dart';
@@ -39,6 +40,9 @@ class VoceMsgTile extends StatefulWidget {
   final ValueNotifier<bool>? enableSelection;
   final void Function(MsgTileData tileData, bool selected)? onSelectChange;
 
+  /// When equal to this tile's mid, briefly use a highlight background.
+  final ValueNotifier<int?>? highlightMidNotifier;
+
   const VoceMsgTile({
     Key? key,
     required this.tileData,
@@ -46,6 +50,7 @@ class VoceMsgTile extends StatefulWidget {
     this.enableSelection,
     this.onSelectChange,
     this.onTapAvatar,
+    this.highlightMidNotifier,
   }) : super(key: key);
 
   @override
@@ -99,22 +104,39 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
             return ValueListenableBuilder<bool>(
                 valueListenable: widget.tileData.isAutoDeleteN,
                 builder: (context, isAutoDelete, _) {
-                  return Container(
-                      decoration: BoxDecoration(
-                        color: _getMsgTileBgColor(
-                            isPinned: isPinned, isAutoDelete: isAutoDelete),
-                      ),
-                      constraints: BoxConstraints(
-                          minHeight: avatarSize, maxWidth: width),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (isPinned) _buildPinnedBy(pinnedBy),
-                          _buildTileWithSelectionIcon(),
-                        ],
-                      ));
+                  Widget tileBody({required bool highlighted}) {
+                    return AnimatedContainer(
+                        duration: const Duration(milliseconds: 350),
+                        decoration: BoxDecoration(
+                          color: highlighted
+                              ? const Color(0xFFFFF3C4)
+                              : _getMsgTileBgColor(
+                                  isPinned: isPinned,
+                                  isAutoDelete: isAutoDelete),
+                        ),
+                        constraints: BoxConstraints(
+                            minHeight: avatarSize, maxWidth: width),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (isPinned) _buildPinnedBy(pinnedBy),
+                            _buildTileWithSelectionIcon(),
+                          ],
+                        ));
+                  }
+
+                  final hl = widget.highlightMidNotifier;
+                  if (hl == null) return tileBody(highlighted: false);
+                  return ValueListenableBuilder<int?>(
+                    valueListenable: hl,
+                    builder: (context, highlightMid, _) {
+                      final mid =
+                          widget.tileData.chatMsgMNotifier.value.mid;
+                      return tileBody(highlighted: highlightMid == mid);
+                    },
+                  );
                 });
           }),
     );
@@ -426,7 +448,10 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
     return ValueListenableBuilder<ChatMsgM>(
         valueListenable: widget.tileData.chatMsgMNotifier,
         builder: (context, chatMsgM, _) {
-          if (chatMsgM.isTextMsg) {
+          if (chatMsgM.isE2ePendingMsg) {
+            return _wrapBubble(
+                E2eDecryptBubble(chatMsgM: chatMsgM, isSelf: isSelf));
+          } else if (chatMsgM.isTextMsg) {
             return _wrapBubble(VoceTextBubble(chatMsgM: chatMsgM, isSelf: isSelf));
           } else if (chatMsgM.isMarkdownMsg) {
             return _wrapBubble(VoceMdBubble(chatMsgM: chatMsgM, isSelf: isSelf));

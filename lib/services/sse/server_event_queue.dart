@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 
 import 'package:vocechat_client/app.dart';
@@ -20,7 +21,7 @@ class EventQueue {
   void add(String sseMsg) {
     if (sseMsg.isNotEmpty) {
       queue.add(sseMsg);
-      _process();
+      unawaited(_process());
     }
   }
 
@@ -28,31 +29,42 @@ class EventQueue {
     queue.clear();
   }
 
-  Future _process() async {
-    if (!isProcessing) {
-      isProcessing = true;
+  /// Drain the queue. Re-enters if items arrived after [isProcessing] flipped
+  /// false — otherwise a race leaves events stranded until the next [add]
+  /// (which is why refresh appeared to "fix" inbound messages).
+  Future<void> _process() async {
+    if (isProcessing) return;
+    isProcessing = true;
+
+    try {
       if (enableStatusDisplay && queue.isNotEmpty) {
         App.app.statusService?.fireTaskLoading(LoadingStatus.loading);
       }
 
-      await Future.doWhile(() async {
+      while (queue.isNotEmpty) {
         try {
-          dynamic topSseMsg = queue.removeFirst();
+          final topSseMsg = queue.removeFirst();
           await closure(topSseMsg);
         } catch (e) {
           App.logger.severe(e);
         }
-        return queue.isNotEmpty;
-      });
-
-      isProcessing = false;
-
-      if (afterTaskCheck != null) {
-        await afterTaskCheck!();
       }
 
-      if (enableStatusDisplay && queue.isEmpty) {
+      if (afterTaskCheck != null) {
+        try {
+          await afterTaskCheck!();
+        } catch (e) {
+          App.logger.severe(e);
+        }
+      }
+
+      if (enableStatusDisplay) {
         App.app.statusService?.fireTaskLoading(LoadingStatus.success);
+      }
+    } finally {
+      isProcessing = false;
+      if (queue.isNotEmpty) {
+        unawaited(_process());
       }
     }
   }

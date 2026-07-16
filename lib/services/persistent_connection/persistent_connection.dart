@@ -64,15 +64,25 @@ abstract class PersistentConnection {
   ///
   /// Should include reconnect time interval awaiting strategy.
   Future<void> reconnect() async {
+    _reconnectTimer?.cancel();
     _reconnectTimer = Timer(Duration(seconds: reconnectSec), () async {
-      if (await SharedFuncs.renewAuthToken(forceRefresh: true)) {
-        connect();
+      try {
+        final ok = await SharedFuncs.renewAuthToken(forceRefresh: true);
+        if (ok) {
+          await connect();
+          return;
+        }
+        App.logger.warning(
+            'SSE reconnect: token renew failed — will retry');
+      } catch (e) {
+        App.logger.severe('SSE reconnect error: $e');
       }
-
+      // Always keep trying — previously a failed renew stopped the loop forever.
       reconnectSec *= 2;
       if (reconnectSec >= 32) {
         reconnectSec = 32;
       }
+      reconnect();
     });
   }
 
@@ -93,6 +103,7 @@ abstract class PersistentConnection {
   /// are inclided in [close] method.
   void onError(dynamic error) {
     App.logger.severe("Error connecting to ${type.name}: $error");
+    // Subclasses (Dio SSE) may override with generation guards.
     close();
     reconnect();
   }

@@ -27,6 +27,7 @@ import 'package:vocechat_client/services/persistent_connection/dio_sse.dart';
 import 'package:vocechat_client/services/persistent_connection/sse.dart';
 import 'package:vocechat_client/services/persistent_connection/web_socket.dart';
 import 'package:vocechat_client/services/status_service.dart';
+import 'package:vocechat_client/services/unread_count_service.dart';
 import 'package:vocechat_client/services/voce_chat_service.dart';
 import 'package:vocechat_client/shared_funcs.dart';
 import 'package:vocechat_client/ui/app_alert_dialog.dart';
@@ -323,6 +324,7 @@ class AuthService {
 
       App.app.chatService = VoceChatService();
       App.app.statusService = StatusService();
+      UnreadCountService.instance.startListening();
 
       return true;
     } catch (e) {

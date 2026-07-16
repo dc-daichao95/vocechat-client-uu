@@ -18,6 +18,9 @@ AdminLoginConfig _$AdminLoginConfigFromJson(Map<String, dynamic> json) =>
           .toList(),
       metamask: json['metamask'] as bool,
       thirdParty: json['third_party'] as bool,
+      e2eAvailable: json['e2e_available'] as bool?,
+      e2eDefaultOn: json['e2e_default_on'] as bool?,
+      e2eProtocolVer: json['e2e_protocol_ver'] as int?,
     );
 
 Map<String, dynamic> _$AdminLoginConfigToJson(AdminLoginConfig instance) =>
@@ -30,4 +33,7 @@ Map<String, dynamic> _$AdminLoginConfigToJson(AdminLoginConfig instance) =>
       'oidc': instance.oidc.map((e) => e.toJson()).toList(),
       'metamask': instance.metamask,
       'third_party': instance.thirdParty,
+      'e2e_available': instance.e2eAvailable,
+      'e2e_default_on': instance.e2eDefaultOn,
+      'e2e_protocol_ver': instance.e2eProtocolVer,
     };

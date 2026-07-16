@@ -29,6 +29,7 @@ import 'package:vocechat_client/ui/app_colors.dart';
 import 'package:vocechat_client/ui/app_icons_icons.dart';
 import 'package:vocechat_client/ui/app_text_styles.dart';
 import 'package:vocechat_client/ui/chats/chat/e2e_session_banner.dart';
+import 'package:vocechat_client/ui/chats/chat/message_time_search_sheet.dart';
 import 'package:vocechat_client/ui/chats/chat/chat_bar.dart';
 import 'package:vocechat_client/ui/chats/chat/input_field/app_mentions.dart';
 import 'package:vocechat_client/ui/chats/chat/input_field/chat_textfield.dart';
@@ -117,6 +118,9 @@ class _VoceChatPageState extends State<VoceChatPage>
 
   final ScrollController _scrollController = ScrollController();
 
+  /// Keys for locate-from-search (Scrollable.ensureVisible).
+  final Map<int, GlobalKey> _msgKeys = {};
+
   /// The animation controller for the message tile.
   late final AnimationController _aniController;
 
@@ -137,6 +141,7 @@ class _VoceChatPageState extends State<VoceChatPage>
     });
 
     widget.controller.addScrollToBottomListener(_scrollToBottom);
+    widget.controller.scrollToMidNotifier.addListener(_onScrollToMidRequested);
 
     // Create the animation controller and set its duration
     _aniController = AnimationController(
@@ -162,6 +167,8 @@ class _VoceChatPageState extends State<VoceChatPage>
   void dispose() {
     VoceAudioService().clear();
     widget.controller.removeScrollToBottomListener(_scrollToBottom);
+    widget.controller.scrollToMidNotifier
+        .removeListener(_onScrollToMidRequested);
 
     _aniController.dispose();
 
@@ -183,6 +190,7 @@ class _VoceChatPageState extends State<VoceChatPage>
         unreadCount: globals.unreadCountSum,
         hideBack: widget.embedded,
         onRefresh: _onRefresh,
+        onTimeSearch: _openTimeSearch,
         onPop: () {
           if (widget.embedded) {
             widget.onCloseEmbedded?.call();
@@ -251,6 +259,40 @@ class _VoceChatPageState extends State<VoceChatPage>
         const SnackBar(content: Text('Refresh failed')),
       );
     }
+  }
+
+  void _openTimeSearch() {
+    final gid = widget.groupInfoNotifier?.value.gid;
+    final dmUid = widget.userInfoNotifier?.value.uid;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => MessageTimeSearchSheet(
+        gid: gid,
+        dmUid: dmUid,
+        onResults: (msgs, {scrollToMid}) async {
+          if (msgs.isEmpty) return;
+          try {
+            for (final m in msgs) {
+              await ChatMsgDao().addOrUpdate(m);
+              App.app.chatService.fireMsg(m, true, snippetOnly: true);
+            }
+          } catch (e) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('写入本地失败: $e')),
+            );
+          }
+        },
+        onJumpToMsg: (msg) async {
+          try {
+            await ChatMsgDao().addOrUpdate(msg);
+            App.app.chatService.fireMsg(msg, true, snippetOnly: false);
+          } catch (_) {}
+          await widget.controller.locateMid(msg.mid);
+        },
+      ),
+    );
   }
 
   Widget _buildContactStatusFloating() {
@@ -819,6 +861,27 @@ class _VoceChatPageState extends State<VoceChatPage>
     });
   }
 
+  void _onScrollToMidRequested() {
+    final mid = widget.controller.scrollToMidNotifier.value;
+    if (mid == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final key = _msgKeys[mid];
+      final ctx = key?.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          alignment: 0.35,
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeInOut,
+        );
+      }
+      // Clear request so the same mid can be requested again later.
+      if (widget.controller.scrollToMidNotifier.value == mid) {
+        widget.controller.scrollToMidNotifier.value = null;
+      }
+    });
+  }
+
   Widget _buildVoceMsgList() {
     return Expanded(
       child: Scrollbar(
@@ -863,6 +926,7 @@ class _VoceChatPageState extends State<VoceChatPage>
               tileData: tileData,
               sizeFactor: ani,
               enableSelection: selectEnabled,
+              highlightMidNotifier: widget.controller.highlightMidNotifier,
               onSelectChange: (tileData, selected) {
                 final chatMsgM = tileData.chatMsgMNotifier;
                 if (selected) {
@@ -894,8 +958,11 @@ class _VoceChatPageState extends State<VoceChatPage>
                     },
             );
 
+            final mid = tileData.chatMsgMNotifier.value.mid;
+            final msgKey = _msgKeys.putIfAbsent(mid, () => GlobalKey());
+
             return GestureDetector(
-                key: ObjectKey(tileData),
+                key: msgKey,
                 onLongPress: () {
                   showModalBottomSheet(
                     context: context,

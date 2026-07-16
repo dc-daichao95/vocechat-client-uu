@@ -13,6 +13,9 @@ class AdminLoginConfig {
   List<OidcInfo> oidc;
   bool metamask;
   bool thirdParty;
+  bool? e2eAvailable;
+  bool? e2eDefaultOn;
+  int? e2eProtocolVer;
 
   AdminLoginConfig(
       {required this.whoCanSignUp,
@@ -22,7 +25,10 @@ class AdminLoginConfig {
       required this.github,
       required this.oidc,
       required this.metamask,
-      required this.thirdParty});
+      required this.thirdParty,
+      this.e2eAvailable,
+      this.e2eDefaultOn,
+      this.e2eProtocolVer});
 
   factory AdminLoginConfig.fromJson(Map<String, dynamic> json) =>
       _$AdminLoginConfigFromJson(json);

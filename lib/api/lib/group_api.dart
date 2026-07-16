@@ -128,6 +128,43 @@ class GroupApi {
     return newRes;
   }
 
+  Future<Response<int>> sendE2eMsg(
+      int gid, String msg, Map<String, dynamic>? properties) async {
+    final dio = DioUtil.token(baseUrl: _baseUrl);
+    dio.options.headers["x-properties"] =
+        base64.encode(utf8.encode(json.encode(properties)));
+    dio.options.headers["content-type"] = typeE2e;
+    dio.options.receiveTimeout = Duration(milliseconds: 10000);
+
+    Map<String, dynamic> refererHeader = {
+      'referer': App.app.chatServerM.fullUrl
+    };
+    if (App.app.chatServerM.url == "dev.voce.chat") {
+      refererHeader = {'referer': "https://privoce.voce.chat"};
+    }
+    dio.options.headers.addAll(refererHeader);
+
+    final res = await dio.post(
+      "/$gid/send",
+      data: msg,
+      options: Options(contentType: typeE2e, headers: Map<String, dynamic>.from(dio.options.headers)),
+    );
+
+    var newRes = Response<int>(
+        headers: res.headers,
+        requestOptions: res.requestOptions,
+        isRedirect: res.isRedirect,
+        statusCode: res.statusCode,
+        statusMessage: res.statusMessage,
+        redirects: res.redirects,
+        extra: res.extra);
+
+    if (res.statusCode == 200 && res.data != null) {
+      newRes.data = res.data as int;
+    }
+    return newRes;
+  }
+
   Future<Response<int>> sendMarkdownMsg(int gid, String msg, String cid) async {
     final dio = DioUtil.token(baseUrl: _baseUrl);
     dio.options.headers["x-properties"] =
@@ -334,13 +371,22 @@ class GroupApi {
   }
 
   Future<Response> getHistory(int gid, int? beforeMid,
-      {int limit = 20, bool enableRetry = false}) async {
+      {int limit = 20,
+      bool enableRetry = false,
+      int? afterTs,
+      int? beforeTs}) async {
     final dio = DioUtil.token(baseUrl: _baseUrl, enableRetry: enableRetry);
 
     String url = "/$gid/history?limit=$limit";
 
     if (beforeMid != null) {
       url += "&before=$beforeMid";
+    }
+    if (afterTs != null) {
+      url += "&after_ts=$afterTs";
+    }
+    if (beforeTs != null) {
+      url += "&before_ts=$beforeTs";
     }
 
     return dio.get(url);

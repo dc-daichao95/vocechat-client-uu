@@ -10,6 +10,7 @@ import 'package:vocechat_client/services/auth_service.dart';
 import 'package:vocechat_client/services/voce_chat_service.dart';
 import 'package:vocechat_client/services/db.dart';
 import 'package:vocechat_client/services/status_service.dart';
+import 'package:vocechat_client/services/unread_count_service.dart';
 import 'package:simple_logger/simple_logger.dart';
 import 'package:vocechat_client/shared_funcs.dart';
 
@@ -67,6 +68,7 @@ class App {
 
     // Update Services
     authService?.dispose();
+    UnreadCountService.instance.stopListening();
     chatService.dispose();
     statusService?.dispose();
 
@@ -74,6 +76,7 @@ class App {
     statusService = StatusService();
     authService = AuthService(chatServerM: chatServerM);
     chatService = VoceChatService();
+    UnreadCountService.instance.startListening();
 
     final navigator = navigatorKey.currentState;
 

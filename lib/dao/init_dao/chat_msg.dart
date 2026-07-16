@@ -150,6 +150,20 @@ class ChatMsgM extends Equatable with M {
     }
   }
 
+  /// Undecrypted E2E envelope still in DB (must render via decrypt bubble).
+  bool get isE2ePendingMsg {
+    try {
+      final map = json.decode(detail) as Map;
+      if (map["content_type"] == typeE2e) return true;
+      final props = map["properties"];
+      return props is Map &&
+          props["e2e_decrypt_failed"] == true &&
+          props["e2e_envelope"] is String;
+    } catch (e) {
+      return false;
+    }
+  }
+
   bool get isMarkdownMsg {
     try {
       final type = json.decode(detail)["content_type"] as String?;
@@ -279,6 +293,9 @@ class ChatMsgM extends Equatable with M {
         return MsgContentType.archive;
       case typeAudio:
         return MsgContentType.audio;
+      case typeE2e:
+        // Undecrypted legacy rows; prefer text placeholder rendering.
+        return MsgContentType.text;
       default:
         return null;
     }

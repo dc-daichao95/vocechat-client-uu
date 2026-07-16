@@ -8,18 +8,11 @@ import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/app_consts.dart';
 import 'package:vocechat_client/services/persistent_connection/persistent_connection.dart';
 
-/// Solution 3: SSE transport implemented on top of Dio.
+/// SSE transport on Dio (shares TLS bypass with REST).
 ///
-/// The legacy [VoceSse] uses `universal_html`'s `EventSource`, whose HTTP client
-/// is separate from Dio and does NOT share Dio's TLS configuration. On servers
-/// with self-signed / non-standard certificates this makes REST calls succeed
-/// (Dio bypasses cert validation) while the SSE stream fails, so the client
-/// never reaches "ready" and messages are never persisted.
-///
-/// This implementation opens the same `/api/user/events` stream through Dio with
-/// the identical certificate handling, then parses the SSE `data:` frames and
-/// forwards each event payload via [fireServerEvent], matching the behaviour the
-/// rest of the app already expects.
+/// Uses a monotonic [_generation] so cancel/close of an old stream cannot call
+/// [onError]/[reconnect] and tear down a newer live connection — that race
+/// previously left `afterReady=false` and dropped live messages until refresh.
 class VoceDioSse extends PersistentConnection {
   static final VoceDioSse _singleton = VoceDioSse._internal();
 
@@ -35,19 +28,24 @@ class VoceDioSse extends PersistentConnection {
   CancelToken? _cancelToken;
   StreamSubscription<String>? _subscription;
 
+  /// Bumped on every [connect]/[close]. Callbacks from older gens are ignored.
+  int _generation = 0;
+
   Dio _buildDio() {
     final dio = Dio(BaseOptions(
-      // Long-lived stream: no receive timeout, the server sends heartbeats.
       connectTimeout: const Duration(seconds: 30),
+      // Heartbeats / keep-alives keep the stream alive; do not time out idle.
+      receiveTimeout: Duration.zero,
       responseType: ResponseType.stream,
     ));
 
-    // Mirror DioUtil's TLS handling so SSE and REST behave identically.
     dio.httpClientAdapter = IOHttpClientAdapter(
       createHttpClient: () {
         final HttpClient client =
             HttpClient(context: SecurityContext(withTrustedRoots: false));
         client.badCertificateCallback = (cert, host, port) => true;
+        // Avoid OS sockets silently dying without onDone on Windows.
+        client.idleTimeout = const Duration(seconds: 120);
         return client;
       },
       validateCertificate: (certificate, host, port) => true,
@@ -69,17 +67,49 @@ class VoceDioSse extends PersistentConnection {
     }
   }
 
+  Future<void> _teardownStreamOnly() async {
+    try {
+      await _subscription?.cancel();
+    } catch (_) {}
+    _subscription = null;
+
+    try {
+      _cancelToken?.cancel('superseded');
+    } catch (_) {}
+    _cancelToken = null;
+
+    try {
+      _dio?.close(force: true);
+    } catch (_) {}
+    _dio = null;
+  }
+
   @override
   Future<void> connect() async {
-    if (isConnecting) return;
+    if (isConnecting) {
+      App.logger.info('Dio SSE connect skipped — already connecting');
+      return;
+    }
 
     isConnecting = true;
+    final gen = ++_generation;
+    App.logger.info('Dio SSE connect gen=$gen');
+
+    // Tear down previous stream WITHOUT marking disconnected / afterReady false
+    // yet — that caused UI to drop messages during brief reconnect windows.
+    await _teardownStreamOnly();
+    // Cancel any pending reconnect from a previous failure.
+    resetReconnectionDelay();
+
     fireAfterReady(false);
 
-    await close();
-
     final url = await prepareConnectionUrl(type);
-    App.logger.info("Connecting Dio SSE: $url");
+    if (url.isEmpty) {
+      isConnecting = false;
+      onError('SSE url empty', generation: gen);
+      return;
+    }
+    App.logger.info('Connecting Dio SSE gen=$gen: $url');
     App.app.statusService?.fireSseLoading(PersConnStatus.connecting);
 
     try {
@@ -88,12 +118,26 @@ class VoceDioSse extends PersistentConnection {
 
       final response = await _dio!.get<ResponseBody>(
         url,
-        options: Options(responseType: ResponseType.stream),
+        options: Options(
+          responseType: ResponseType.stream,
+          headers: {
+            'Accept': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          },
+        ),
         cancelToken: _cancelToken,
       );
 
+      if (gen != _generation) {
+        App.logger.info('Dio SSE stale response gen=$gen (current=$_generation)');
+        isConnecting = false;
+        return;
+      }
+
       if (response.statusCode != 200 || response.data == null) {
-        onError("SSE responded with status ${response.statusCode}");
+        isConnecting = false;
+        onError('SSE status ${response.statusCode}', generation: gen);
         return;
       }
 
@@ -110,56 +154,67 @@ class VoceDioSse extends PersistentConnection {
           .transform(const LineSplitter())
           .listen(
         (line) {
+          if (gen != _generation) return;
+
           if (line.isEmpty) {
-            // End of one SSE event: flush accumulated data lines.
             final payload = dataBuffer.toString();
             dataBuffer.clear();
             if (payload.trim().isNotEmpty) {
-              App.app.statusService?.fireSseLoading(PersConnStatus.successful);
               isConnected = true;
               isConnecting = false;
               resetReconnectionDelay();
+              App.app.statusService?.fireSseLoading(PersConnStatus.successful);
               fireServerEvent(payload);
             }
-          } else if (line.startsWith(":")) {
-            // Comment / keep-alive line, ignore.
-          } else if (line.startsWith("data:")) {
-            // Strip "data:" and at most one leading space, per SSE spec.
+          } else if (line.startsWith(':')) {
+            // Poem keep-alive comment (~5s). Counts as liveness only — do NOT
+            // inject a fake heartbeat (that would force afterReady too early).
+            fireServerEvent('{"type":"keepalive"}');
+          } else if (line.startsWith('data:')) {
             var chunk = line.substring(5);
-            if (chunk.startsWith(" ")) chunk = chunk.substring(1);
+            if (chunk.startsWith(' ')) chunk = chunk.substring(1);
+            if (dataBuffer.isNotEmpty) dataBuffer.write('\n');
             dataBuffer.write(chunk);
-          } else {
-            // Other SSE fields (event:, id:, retry:) are not used here.
           }
         },
         onError: (error) {
-          onError(error);
+          if (gen != _generation) return;
+          onError(error, generation: gen);
         },
         onDone: () {
-          onError("SSE stream closed.");
+          if (gen != _generation) return;
+          onError('SSE stream closed (gen=$gen)', generation: gen);
         },
         cancelOnError: true,
       );
     } catch (e) {
-      onError(e);
+      if (gen != _generation) return;
+      isConnecting = false;
+      onError(e, generation: gen);
     }
   }
 
   @override
+  void onError(dynamic error, {int? generation}) {
+    if (generation != null && generation != _generation) {
+      App.logger.info(
+          'Ignoring stale SSE error gen=$generation (current=$_generation): $error');
+      return;
+    }
+    App.logger.severe('Error connecting to ${type.name}: $error');
+    // Advance generation so in-flight callbacks from this stream are ignored.
+    _generation++;
+    unawaited(_teardownStreamOnly().then((_) async {
+      await generalClose();
+      reconnect();
+    }));
+  }
+
+  @override
   Future<void> close() async {
-    try {
-      await _subscription?.cancel();
-    } catch (_) {}
-    _subscription = null;
-
-    try {
-      _cancelToken?.cancel();
-    } catch (_) {}
-    _cancelToken = null;
-
-    _dio?.close(force: true);
-    _dio = null;
-
+    _generation++;
+    resetReconnectionDelay();
+    await _teardownStreamOnly();
     await generalClose();
   }
 }

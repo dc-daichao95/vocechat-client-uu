@@ -1,6 +1,7 @@
 const chatEvent = "chat";
 const groupChangedEvent = "group_changed";
 const heartbeatEvent = "heartbeat";
+const keepaliveEvent = "keepalive";
 const joinedGroupEvent = "joined_group";
 const kickEvent = "kick";
 const kickFromGroupEvent = "kick_from_group";

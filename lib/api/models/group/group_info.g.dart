@@ -22,6 +22,7 @@ GroupInfo _$GroupInfoFromJson(Map<String, dynamic> json) => GroupInfo(
       json['only_owner_can_send_msg'] as bool?,
       json['show_email'] as bool?,
       json['ext_settings'] as String?,
+      e2eEnabled: json['e2e_enabled'] as bool?,
     );
 
 Map<String, dynamic> _$GroupInfoToJson(GroupInfo instance) => <String, dynamic>{
@@ -39,4 +40,5 @@ Map<String, dynamic> _$GroupInfoToJson(GroupInfo instance) => <String, dynamic>{
       'only_owner_can_send_msg': instance.onlyOwnerCanSendMsg,
       'show_email': instance.showEmail,
       'ext_settings': instance.extSettings,
+      'e2e_enabled': instance.e2eEnabled,
     };

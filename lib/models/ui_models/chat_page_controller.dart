@@ -15,7 +15,10 @@ import 'package:vocechat_client/models/ui_models/msg_tile_data.dart';
 import 'package:vocechat_client/services/file_handler.dart';
 import 'package:vocechat_client/services/file_handler/audio_file_handler.dart';
 import 'package:vocechat_client/services/file_handler/user_avatar_handler.dart';
+import 'package:vocechat_client/services/msg_notification_service.dart';
 import 'package:vocechat_client/services/task_queue.dart';
+import 'package:vocechat_client/services/unread_count_service.dart';
+import 'package:vocechat_client/shared_funcs.dart';
 import 'package:vocechat_client/services/voce_chat_service.dart';
 import 'package:vocechat_client/ui/chats/chat/voce_msg_tile/voce_msg_tile.dart';
 
@@ -54,6 +57,10 @@ class ChatPageController {
   ValueNotifier<bool> isLoadingNotifier = ValueNotifier(false);
   Set<VoidCallback> _scrollToBottomListeners = {};
   ValueNotifier<bool> isLoadingHistory = ValueNotifier(false);
+  /// Mid to briefly highlight after locate-from-search.
+  final ValueNotifier<int?> highlightMidNotifier = ValueNotifier(null);
+  /// Mid the chat page should scroll into view once present in the list.
+  final ValueNotifier<int?> scrollToMidNotifier = ValueNotifier(null);
   // ValueNotifier<ContactStatus> contactStatusNotifier =
   //     ValueNotifier(ContactStatus.none);
 
@@ -143,6 +150,32 @@ class ChatPageController {
     _localMidSet.clear();
     _userInfoMap.clear();
     _avatarMap.clear();
+    highlightMidNotifier.dispose();
+    scrollToMidNotifier.dispose();
+  }
+
+  /// Ensure [mid] is in the list (insert from DB if needed), then ask UI to
+  /// scroll + highlight it.
+  Future<void> locateMid(int mid) async {
+    var index = tileDataList
+        .indexWhere((e) => e.chatMsgMNotifier.value.mid == mid);
+    if (index < 0) {
+      final msg = await _chatMsgDao.getMsgByMid(mid);
+      if (msg != null) {
+        final tileData = await prepareTileData(msg);
+        await insert(findInsertIndex(msg), tileData, scroll: false);
+        index = tileDataList
+            .indexWhere((e) => e.chatMsgMNotifier.value.mid == mid);
+      }
+    }
+    if (index < 0) return;
+    highlightMidNotifier.value = mid;
+    scrollToMidNotifier.value = mid;
+    Future.delayed(const Duration(seconds: 3), () {
+      if (highlightMidNotifier.value == mid) {
+        highlightMidNotifier.value = null;
+      }
+    });
   }
 
   void notifyScrollToBottomListeners() {
@@ -196,6 +229,8 @@ class ChatPageController {
     } else {
       throw Exception('Neither channel nor user');
     }
+    // Clear taskbar / nav badge after marking read.
+    UnreadCountService.instance.requestRecompute();
   }
 
   /// Filter expired and deleted(only in server history) messages, prepare and
@@ -460,6 +495,16 @@ class ChatPageController {
     return VoceMsgTile(tileData: item, sizeFactor: animation);
   }
 
+  bool _shouldMarkIncomingAsRead(ChatMsgM chatMsgM) {
+    final notify = MsgNotificationService.instance;
+    if (!notify.appInForeground) return false;
+    final chatId = SharedFuncs.getChatId(
+      uid: chatMsgM.dmUid,
+      gid: chatMsgM.gid,
+    );
+    return chatId != null && chatId == notify.focusedChatId;
+  }
+
   // -- Subscriptions
 
   /// Handles all [chatMsgM] from [ChatService] via [onMessage] function.
@@ -476,7 +521,9 @@ class ChatPageController {
         insert(findInsertIndex(chatMsgM), tileData);
       });
 
-      await updateReadIndex(chatMsgM.mid);
+      if (_shouldMarkIncomingAsRead(chatMsgM)) {
+        await updateReadIndex(chatMsgM.mid);
+      }
     }
   }
 

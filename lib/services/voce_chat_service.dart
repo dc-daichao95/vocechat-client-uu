@@ -18,6 +18,7 @@ import 'package:vocechat_client/api/models/user/user_info.dart';
 import 'package:vocechat_client/api/models/user/user_info_update.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/app_consts.dart';
+import 'package:vocechat_client/services/msg_notification_service.dart';
 import 'package:vocechat_client/dao/init_dao/archive.dart';
 import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
 import 'package:vocechat_client/dao/init_dao/contacts.dart';
@@ -72,9 +73,9 @@ typedef ChatServerAware = Future<void> Function(ChatServerM chatServerM);
 /// but SSE fails on self-signed certs" asymmetry). When false, the legacy
 /// `EventSource`-based [VoceSse] is used.
 ///
-/// Default is false to keep the verified transport as-is; flip to true and
-/// rebuild to validate the Dio-based SSE on a real device / self-signed server.
-const bool useDioSse = false;
+/// Default is true: Windows/desktop EventSource via universal_html is unreliable
+/// (silent stalls with no onError), which matches "must refresh to get messages".
+const bool useDioSse = true;
 
 /// The active persistent SSE connection, selected by [useDioSse].
 PersistentConnection get activeSse => useDioSse ? VoceDioSse() : VoceSse();
@@ -82,6 +83,7 @@ PersistentConnection get activeSse => useDioSse ? VoceDioSse() : VoceSse();
 class VoceChatService {
   VoceChatService() {
     setReadIndexTimer();
+    _startSseWatchdog();
 
     eventQueue = EventQueue(
         closure: handleEventStream,
@@ -95,6 +97,7 @@ class VoceChatService {
     mainTaskQueue.cancel();
     eventQueue.clear();
     readIndexTimer.cancel();
+    _sseWatchdog?.cancel();
     // VoceWebSocket().close();
     // Close both implementations so switching [useDioSse] never leaks a stream.
     VoceSse().close();
@@ -114,6 +117,10 @@ class VoceChatService {
   late EventQueue eventQueue;
   late TaskQueue mainTaskQueue;
   late Timer readIndexTimer;
+  Timer? _sseWatchdog;
+  DateTime _lastSseActivityAt = DateTime.now();
+  int _heartbeatsWhileNotReady = 0;
+  bool _sseInitInFlight = false;
 
   bool afterReady = false;
 
@@ -123,34 +130,46 @@ class VoceChatService {
   final Map<int, ReactionM> reactionMap = {};
 
   Future<void> prePersistentConnectionInits() async {
-    final res = await UserApi().getUserContacts();
+    // Never block SSE connect on identity publish / network.
+    unawaited(_bootstrapE2eIdentity());
 
-    if (res.statusCode == 200 && res.data != null) {
-      final rawList = res.data!;
-      final contactList = rawList.map((e) {
-        return ContactM.fromContactInfo(e.targetUid, e.contactInfo.status,
-            e.contactInfo.createdAt, e.contactInfo.updatedAt);
-      }).toList();
+    try {
+      final res = await UserApi().getUserContacts();
 
-      await ContactDao().batchAdd(contactList);
+      if (res.statusCode == 200 && res.data != null) {
+        final rawList = res.data!;
+        final contactList = rawList.map((e) {
+          return ContactM.fromContactInfo(e.targetUid, e.contactInfo.status,
+              e.contactInfo.createdAt, e.contactInfo.updatedAt);
+        }).toList();
+
+        await ContactDao().batchAdd(contactList);
+      }
+      App.logger.info("Contact list initialized. total: ${res.data?.length}");
+    } catch (e) {
+      App.logger.warning("Contact list init failed: $e");
     }
-    App.logger.info("Contact list initialized. total: ${res.data?.length}");
   }
 
   Future<void> initPersistentConnection() async {
-    // final isWSAvailable = await VoceWebSocket().checkAvailability();
-    // if (isWSAvailable) {
-    //   await _initWebSocket();
-    // } else {
-    //   await _initSse();
-    // }
-    await _initSse();
+    if (_sseInitInFlight) {
+      App.logger.info('SSE init already in flight — skip');
+      return;
+    }
+    _sseInitInFlight = true;
+    try {
+      await _initSse();
+    } finally {
+      _sseInitInFlight = false;
+    }
   }
 
   Future<void> _initWebSocket() async {
     VoceWebSocket().subscribeServerEvent(handleSseEvent);
+    VoceWebSocket().unsubscribeAllReadyListeners();
     VoceWebSocket().subscribeReady((ready) {
       afterReady = ready;
+      if (!ready) _heartbeatsWhileNotReady = 0;
     });
 
     try {
@@ -164,16 +183,35 @@ class VoceChatService {
   Future<void> _initSse() async {
     final conn = activeSse;
     conn.subscribeServerEvent(handleSseEvent);
+    // Replace ready listeners — each re-init used to stack anonymous lambdas.
+    conn.unsubscribeAllReadyListeners();
     conn.subscribeReady((ready) {
       afterReady = ready;
+      if (!ready) _heartbeatsWhileNotReady = 0;
     });
 
     try {
       await prePersistentConnectionInits();
+      _lastSseActivityAt = DateTime.now();
+      _heartbeatsWhileNotReady = 0;
       await conn.connect();
     } catch (e) {
       App.logger.severe(e);
     }
+  }
+
+  /// Server heartbeats every ~15s (+ SSE keep-alive comments ~5s).
+  /// If the stream goes quiet for 45s, force a reconnect.
+  void _startSseWatchdog() {
+    _sseWatchdog?.cancel();
+    _sseWatchdog = Timer.periodic(const Duration(seconds: 15), (_) {
+      final silent = DateTime.now().difference(_lastSseActivityAt);
+      if (silent < const Duration(seconds: 45)) return;
+      App.logger.warning(
+          'SSE watchdog: no activity for ${silent.inSeconds}s — reconnecting');
+      _lastSseActivityAt = DateTime.now();
+      unawaited(activeSse.close().then((_) => initPersistentConnection()));
+    });
   }
 
   Map<int, int> readIndexGroup = {}; // {gid: mid}
@@ -372,10 +410,22 @@ class VoceChatService {
       {bool? snippetOnly = false}) {
     for (MsgAware msgAware in _msgListeners) {
       try {
-        msgAware(chatMsgM, afterReady, snippetOnly: snippetOnly);
+        // ignore: discarded_futures
+        Future.sync(() => msgAware(chatMsgM, afterReady,
+                snippetOnly: snippetOnly))
+            .catchError((e, st) {
+          App.logger.severe('MsgAware failed: $e\n$st');
+        });
       } catch (e) {
         App.logger.severe(e);
       }
+    }
+    // Notify for live chat even if ready was briefly false after reconnect.
+    if (snippetOnly != true &&
+        (afterReady == true || _msgListeners.isNotEmpty)) {
+      // ignore: unawaited_futures
+      MsgNotificationService.instance
+          .onInboundMsg(chatMsgM, afterReady: true);
     }
   }
 
@@ -450,6 +500,17 @@ class VoceChatService {
 
         case heartbeatEvent:
           App.app.statusService?.fireSseLoading(PersConnStatus.successful);
+          _lastSseActivityAt = DateTime.now();
+          if (!afterReady) {
+            _heartbeatsWhileNotReady++;
+            unawaited(_recoverIfStuckBeforeReady());
+          }
+          break;
+
+        case keepaliveEvent:
+          // Poem SSE comment keep-alive — liveness only.
+          _lastSseActivityAt = DateTime.now();
+          App.app.statusService?.fireSseLoading(PersConnStatus.successful);
           break;
 
         case chatEvent:
@@ -469,6 +530,7 @@ class VoceChatService {
         case usersSnapshotEvent:
         case usersStateEvent:
         case usersStateChangedEvent:
+          _lastSseActivityAt = DateTime.now();
           eventQueue.add(event);
           break;
 
@@ -607,12 +669,35 @@ class VoceChatService {
 
         switch (chatMsg.detail["type"]) {
           case chatMsgNormal:
+            // Persist envelopes quickly; decrypt in background after batch insert.
+            if (chatMsg.detail['content_type'] == typeE2e) {
+              final detail = chatMsg.detail;
+              final content = detail['content'] as String? ?? '';
+              final props = Map<String, dynamic>.from(
+                  (detail['properties'] as Map?)?.cast<String, dynamic>() ??
+                      {});
+              props['e2e'] = true;
+              props['e2e_envelope'] = content;
+              props['e2e_decrypt_failed'] = true;
+              detail['properties'] = props;
+            }
             ChatMsgM chatMsgM =
                 ChatMsgM.fromMsg(chatMsg, localMid, MsgStatus.success);
             historyMsgMap.addAll({chatMsgM.mid: chatMsgM});
 
             break;
           case chatMsgReply:
+            if (chatMsg.detail['content_type'] == typeE2e) {
+              final detail = chatMsg.detail;
+              final content = detail['content'] as String? ?? '';
+              final props = Map<String, dynamic>.from(
+                  (detail['properties'] as Map?)?.cast<String, dynamic>() ??
+                      {});
+              props['e2e'] = true;
+              props['e2e_envelope'] = content;
+              props['e2e_decrypt_failed'] = true;
+              detail['properties'] = props;
+            }
             ChatMsgM chatMsgM =
                 ChatMsgM.fromReply(chatMsg, localMid, MsgStatus.success);
             historyMsgMap.addAll({chatMsgM.mid: chatMsgM});
@@ -647,6 +732,15 @@ class VoceChatService {
         msg.reactionData = await reactionDao.getReactions(msg.mid);
         result.add(msg);
       }
+
+      // Background-decrypt E2E envelopes from history so UI is not blocked.
+      unawaited(Future(() async {
+        for (final m in result) {
+          if (m.isE2ePendingMsg) {
+            await _decryptPersistedE2e(m);
+          }
+        }
+      }));
 
       return result;
     } catch (e) {
@@ -786,11 +880,11 @@ class VoceChatService {
     await saveDmInfoMap();
 
     afterReady = true;
+    _heartbeatsWhileNotReady = 0;
 
     App.app.statusService?.fireSseLoading(PersConnStatus.successful);
-    // Publish E2E identity once after history sync; peers use it for wraps / sk_dist.
-    // Incoming sk_dist in history is already applied via _decryptE2eInPlace.
-    unawaited(_bootstrapE2eIdentity());
+    // Identity already published in prePersistentConnectionInits; refresh + retry.
+    unawaited(_bootstrapE2eIdentity().then((_) => retryPendingE2eDecrypts()));
     fireReady();
   }
 
@@ -1621,23 +1715,47 @@ class VoceChatService {
     }
   }
 
+  /// Web uses `local_id`; Flutter send uses `cid`. Accept either for self-echo.
+  String _localMidFromProps(dynamic properties) {
+    if (properties is Map) {
+      final id = properties['cid'] ?? properties['local_id'];
+      if (id != null && '$id'.isNotEmpty) return '$id';
+    }
+    return uuid();
+  }
+
   Future<void> _handleMsgNormal(ChatMsg chatMsg) async {
     String localMid;
     final isSelf = chatMsg.fromUid == App.app.userDb!.uid;
     if (isSelf) {
-      localMid = chatMsg.detail['properties']?['cid'] ?? uuid();
+      localMid = _localMidFromProps(chatMsg.detail['properties']);
     } else {
       localMid = uuid();
     }
 
+    final isE2e = chatMsg.detail['content_type'] == typeE2e;
+
+    // CRITICAL: do NOT await slow E2E decrypt on the SSE event queue.
+    // Decrypting here previously stalled "ready" and all subsequent chat pushes,
+    // so the App appeared to "not receive" web messages. Persist envelope first,
+    // push UI, then decrypt in the background (Web-like).
+    if (isE2e) {
+      final detail = chatMsg.detail;
+      final content = detail['content'] as String? ?? '';
+      final props = Map<String, dynamic>.from(
+          (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
+      props['e2e'] = true;
+      props['e2e_envelope'] = content;
+      props['e2e_decrypt_failed'] = true;
+      detail['properties'] = props;
+      // Keep content_type = typeE2e for decrypt-on-render.
+    }
+
     try {
-      await _decryptE2eInPlace(chatMsg);
-      // Own outgoing: if decrypt failed, keep local plaintext optimistic row
-      // (HTTP success / optimistic UI) and only refresh mid/status.
       final detail = chatMsg.detail;
       final decryptFailed = detail['properties'] is Map &&
           detail['properties']['e2e_decrypt_failed'] == true;
-      if (isSelf && decryptFailed) {
+      if (isSelf && decryptFailed && !isE2e) {
         final existing = await ChatMsgDao().first(
             where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
         if (existing != null) {
@@ -1648,77 +1766,183 @@ class VoceChatService {
           return;
         }
       }
+      // Own optimistic plaintext row: keep it when echo arrives as e2e.
+      if (isSelf && isE2e) {
+        final existing = await ChatMsgDao().first(
+            where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
+        if (existing != null) {
+          existing.mid = chatMsg.mid;
+          existing.statusStr = MsgStatus.success.name;
+          await ChatMsgDao().update(existing);
+          fireMsg(existing, afterReady || _msgListeners.isNotEmpty);
+          return;
+        }
+      }
+
       ChatMsgM chatMsgM =
           ChatMsgM.fromMsg(chatMsg, localMid, MsgStatus.success);
       await cumulateMsg(chatMsgM);
       await cumulateDmInfo(chatMsgM);
+
+      if (isE2e) {
+        unawaited(_decryptPersistedE2e(chatMsgM));
+      }
     } catch (e) {
       App.logger.severe(e);
     }
   }
 
-  /// Decrypt vocechat/e2e envelopes before persist so tiles render as text/file.
-  Future<void> _decryptE2eInPlace(ChatMsg chatMsg) async {
-    final detail = chatMsg.detail;
-    final ct = detail['content_type'] as String?;
-    if (ct != typeE2e) return;
-
+  /// Background decrypt after the SSE queue has already persisted the envelope.
+  Future<void> _decryptPersistedE2e(ChatMsgM chatMsgM) async {
     final myUid = App.app.userDb?.uid;
     if (myUid == null) return;
-
-    final content = detail['content'] as String?;
-    if (content == null || content.isEmpty) return;
-
-    final props = Map<String, dynamic>.from(
-        (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
-
-    final dec = await E2eCrypto.decryptIncoming(uid: myUid, content: content);
-    if (dec == null) {
-      detail['content'] = '[Encrypted message — unable to decrypt]';
-      detail['content_type'] = typeText;
-      props['e2e'] = true;
-      props['e2e_decrypt_failed'] = true;
-      detail['properties'] = props;
-      return;
-    }
-
-    if (dec.kind == 'sk_dist') {
-      detail['content'] = dec.plaintext;
-      detail['content_type'] = typeText;
-      props['e2e'] = true;
-      props['e2e_sk_dist'] = true;
-      detail['properties'] = props;
-      return;
-    }
-
-    if (dec.kind == 'file' && dec.file != null) {
-      final f = dec.file!;
-      final path = (f['path'] ?? '') as String;
-      final name = (f['name'] ?? 'file') as String;
-      final mime = (f['mime'] ?? 'application/octet-stream') as String;
-      final size = f['size'] ?? 0;
-      detail['content'] = path;
-      detail['content_type'] = typeFile;
-      props['e2e'] = true;
-      props['inner_content_type'] = typeFile;
-      props['name'] = name;
-      props['size'] = size;
-      props['content_type'] = mime;
-      props['e2e_file_path'] = path;
-      if (f['fiv'] != null) props['e2e_file_fiv'] = f['fiv'];
-      if (dec.fileMk != null) {
-        props['e2e_file_mk'] = base64Encode(dec.fileMk!);
+    try {
+      final detail = Map<String, dynamic>.from(json.decode(chatMsgM.detail));
+      final ok =
+          await E2eCrypto.rewriteDetailInPlace(uid: myUid, detail: detail)
+              .timeout(const Duration(seconds: 5), onTimeout: () => false);
+      if (!ok) return;
+      chatMsgM.detail = json.encode(detail);
+      await ChatMsgDao().update(chatMsgM);
+      // UI refresh only — OS toast already fired on envelope arrival.
+      fireMsg(chatMsgM, true, snippetOnly: true);
+      final props = detail['properties'];
+      if (props is Map && props['e2e_sk_dist'] == true) {
+        unawaited(retryPendingE2eDecrypts());
       }
-      detail['properties'] = props;
-      return;
+    } catch (e) {
+      App.logger.warning('Background E2E decrypt failed mid=${chatMsgM.mid}: $e');
+    }
+  }
+
+  Future<void> _recoverIfStuckBeforeReady() async {
+    if (afterReady) return;
+
+    final hasPending = msgMap.isNotEmpty || reactionMap.isNotEmpty;
+    // After reconnect, ready may be lost while the stream is healthy (heartbeats
+    // arrive). Force ready after a couple heartbeats even with an empty snapshot.
+    if (!hasPending && _heartbeatsWhileNotReady < 2) return;
+
+    App.logger.warning(
+        'SSE ready stuck (pendingMsgs=${msgMap.length}, heartbeats=$_heartbeatsWhileNotReady) — forcing ready');
+    try {
+      if (hasPending) {
+        await saveMaxMid();
+        await saveReactions();
+        await saveChatMsgs();
+        await saveDmInfoMap();
+      }
+      afterReady = true;
+      _heartbeatsWhileNotReady = 0;
+      App.app.statusService?.fireSseLoading(PersConnStatus.successful);
+      fireReady();
+      unawaited(retryPendingE2eDecrypts());
+    } catch (e) {
+      App.logger.severe(e);
+    }
+  }
+
+  /// Re-decrypt pending E2E rows after identity / sk_dist is available.
+  Future<void> retryPendingE2eDecrypts() async {
+    final myUid = App.app.userDb?.uid;
+    if (myUid == null) return;
+    try {
+      final all = await ChatMsgDao().list(orderBy: '${ChatMsgM.F_mid} DESC');
+      var n = 0;
+      final lostEnvelope = <ChatMsgM>[];
+      for (final m in all.take(500)) {
+        Map? detailMap;
+        try {
+          detailMap = json.decode(m.detail) as Map?;
+        } catch (_) {
+          continue;
+        }
+        if (detailMap == null) continue;
+        final ct = detailMap['content_type'] as String?;
+        final props = detailMap['properties'];
+        final failed = props is Map && props['e2e_decrypt_failed'] == true;
+        final hasEnv = props is Map && props['e2e_envelope'] is String;
+        if (ct != typeE2e && !(failed && hasEnv)) {
+          if (failed && !hasEnv) lostEnvelope.add(m);
+          continue;
+        }
+
+        final detail = Map<String, dynamic>.from(detailMap);
+        final ok =
+            await E2eCrypto.rewriteDetailInPlace(uid: myUid, detail: detail);
+        if (!ok) continue;
+
+        m.detail = json.encode(detail);
+        await ChatMsgDao().update(m);
+        fireMsg(m, true, snippetOnly: true);
+        n++;
+      }
+      if (lostEnvelope.isNotEmpty) {
+        n += await _rehydrateE2eEnvelopes(lostEnvelope, myUid);
+      }
+      if (n > 0) {
+        App.logger.info('E2E retry decrypted $n pending messages');
+        E2eCrypto.notifyKeysUpdated();
+      }
+    } catch (e) {
+      App.logger.warning('E2E retry failed: $e');
+    }
+  }
+
+  /// Recover envelopes previously overwritten with plaintext failure text.
+  Future<int> _rehydrateE2eEnvelopes(List<ChatMsgM> lost, int myUid) async {
+    final byDm = <int, List<ChatMsgM>>{};
+    final byGid = <int, List<ChatMsgM>>{};
+    for (final m in lost) {
+      if (m.isGroupMsg) {
+        byGid.putIfAbsent(m.gid, () => []).add(m);
+      } else if (m.dmUid > 0) {
+        byDm.putIfAbsent(m.dmUid, () => []).add(m);
+      }
+    }
+    var fixed = 0;
+    Future<void> applyList(List raw, Map<int, ChatMsgM> want) async {
+      for (final item in raw) {
+        try {
+          final chatMsg = ChatMsg.fromJson(item);
+          final local = want[chatMsg.mid];
+          if (local == null) continue;
+          if (chatMsg.detail['content_type'] != typeE2e) continue;
+          await E2eCrypto.rewriteDetailInPlace(
+              uid: myUid, detail: chatMsg.detail);
+          local.detail = json.encode(chatMsg.detail);
+          await ChatMsgDao().update(local);
+          fireMsg(local, true, snippetOnly: true);
+          fixed++;
+        } catch (e) {
+          App.logger.warning('E2E rehydrate row failed: $e');
+        }
+      }
     }
 
-    final inner = (props['inner_content_type'] as String?) ?? typeText;
-    detail['content'] = dec.plaintext;
-    detail['content_type'] =
-        (inner == typeMarkdown) ? typeMarkdown : typeText;
-    props['e2e'] = true;
-    detail['properties'] = props;
+    for (final entry in byDm.entries) {
+      try {
+        final res = await UserApi().getHistory(entry.key, null, limit: 100);
+        if (res.statusCode == 200 && res.data is List) {
+          await applyList(
+              res.data as List, {for (final m in entry.value) m.mid: m});
+        }
+      } catch (err) {
+        App.logger.warning('E2E rehydrate DM ${entry.key} failed: $err');
+      }
+    }
+    for (final entry in byGid.entries) {
+      try {
+        final res = await GroupApi().getHistory(entry.key, null, limit: 100);
+        if (res.statusCode == 200 && res.data is List) {
+          await applyList(
+              res.data as List, {for (final m in entry.value) m.mid: m});
+        }
+      } catch (err) {
+        App.logger.warning('E2E rehydrate channel ${entry.key} failed: $err');
+      }
+    }
+    return fixed;
   }
 
   Future<void> cumulateMsg(ChatMsgM chatMsgM) async {
@@ -1744,6 +1968,12 @@ class VoceChatService {
         await ChatMsgDao().addOrUpdate(chatMsgM);
       } catch (e) {
         App.logger.severe(e);
+      }
+
+      // Still push to open chat UIs during pre-ready sync / reconnect so the
+      // desktop shell is not blank while waiting for the ready event.
+      if (_msgListeners.isNotEmpty) {
+        fireMsg(chatMsgM, false);
       }
     }
   }
@@ -1859,16 +2089,43 @@ class VoceChatService {
 
     String localMid;
     if (isSelf) {
-      localMid = chatMsg.detail['properties']?['cid'] ?? uuid();
+      localMid = _localMidFromProps(chatMsg.detail['properties']);
     } else {
       localMid = uuid();
     }
 
+    final isE2e = chatMsg.detail['content_type'] == typeE2e;
+    if (isE2e) {
+      final detail = chatMsg.detail;
+      final content = detail['content'] as String? ?? '';
+      final props = Map<String, dynamic>.from(
+          (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
+      props['e2e'] = true;
+      props['e2e_envelope'] = content;
+      props['e2e_decrypt_failed'] = true;
+      detail['properties'] = props;
+    }
+
     try {
+      if (isSelf && isE2e) {
+        final existing = await ChatMsgDao().first(
+            where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
+        if (existing != null) {
+          existing.mid = chatMsg.mid;
+          existing.statusStr = MsgStatus.success.name;
+          await ChatMsgDao().update(existing);
+          fireMsg(existing, afterReady || _msgListeners.isNotEmpty);
+          return;
+        }
+      }
+
       ChatMsgM chatMsgM =
           ChatMsgM.fromReply(chatMsg, localMid, MsgStatus.success);
       await cumulateMsg(chatMsgM);
       await cumulateDmInfo(chatMsgM);
+      if (isE2e) {
+        unawaited(_decryptPersistedE2e(chatMsgM));
+      }
     } catch (e) {
       App.logger.severe(e);
     }

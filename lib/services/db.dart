@@ -9,10 +9,18 @@ import 'package:sqflite/sqflite.dart';
 import 'package:sqflite/utils/utils.dart';
 
 const _orgDbName = 'org_chat.db';
-var databaseFactory = databaseFactoryFfi;
 late Database db;
 late Database orgDb;
 final _logger = SimpleLogger();
+
+/// Desktop (Windows/Linux/macOS) must use sqflite_common_ffi.
+/// Mobile uses the default sqflite plugin factory.
+void ensureSqfliteInitialized() {
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
+}
 
 // Future<void> initServerDb() async {
 //   const serverDbName = 'app_db.db';
@@ -66,6 +74,7 @@ final _logger = SimpleLogger();
 /// it does not exist. No nothing if db has been created.
 Future<void> initDb({String? dbFileName}) async {
   try {
+    ensureSqfliteInitialized();
     String databasesPath = await getDatabasesPath();
     {
       // org db
@@ -149,6 +158,7 @@ Future<void> initDb({String? dbFileName}) async {
 /// Create DB if it does not exists. Do nothing otherwise.
 Future<void> initCurrentDb(String dbName) async {
   try {
+    ensureSqfliteInitialized();
     String databasesPath = await getDatabasesPath();
     String path = p.join(databasesPath, dbName);
 

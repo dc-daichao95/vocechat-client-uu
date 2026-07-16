@@ -20,6 +20,7 @@ class ChatBar extends StatefulWidget implements PreferredSizeWidget {
   final VoidCallback onPop;
   final bool hideBack;
   final VoidCallback? onRefresh;
+  final VoidCallback? onTimeSearch;
 
   late final bool _isGroup;
 
@@ -30,7 +31,8 @@ class ChatBar extends StatefulWidget implements PreferredSizeWidget {
       required this.unreadCount,
       this.userInfoNotifier,
       this.hideBack = false,
-      this.onRefresh})
+      this.onRefresh,
+      this.onTimeSearch})
       : super(key: key) {
     assert((groupInfoNotifier == null) ^ (userInfoNotifier == null));
     if (groupInfoNotifier != null) {
@@ -205,6 +207,11 @@ class _ChatBarState extends State<ChatBar> {
 
   List<Widget> _buildChannelActions(BuildContext context) {
     return [
+      if (widget.onTimeSearch != null)
+        CupertinoButton(
+            padding: EdgeInsets.zero,
+            onPressed: widget.onTimeSearch,
+            child: Icon(Icons.history, size: 20, color: AppColors.grey500)),
       if (widget.onRefresh != null)
         CupertinoButton(
             padding: EdgeInsets.zero,
@@ -226,6 +233,11 @@ class _ChatBarState extends State<ChatBar> {
 
   List<Widget> _buildDmActions(BuildContext context) {
     return [
+      if (widget.onTimeSearch != null)
+        CupertinoButton(
+            padding: EdgeInsets.zero,
+            onPressed: widget.onTimeSearch,
+            child: Icon(Icons.history, size: 20, color: AppColors.grey500)),
       if (widget.onRefresh != null)
         CupertinoButton(
             padding: EdgeInsets.zero,
