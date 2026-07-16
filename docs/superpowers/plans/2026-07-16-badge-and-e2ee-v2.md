@@ -37,15 +37,15 @@
 
 ---
 
-### Task 2: voce-e2ee-core spike (Phase B)
+### Task 2: voce-e2ee-core spike (Phase B) — **DONE 2026-07-16**
 
 **Files:**
 - Create: `vocechat-server-rust-uu/crates/voce-e2ee-core/`
 
-- [ ] Cargo workspace member + `lib.rs` stub
-- [ ] Dependency/license audit document in crate README
-- [ ] `wasm-pack` build script + Flutter FFI smoke test
-- [ ] Import one official X3DH test vector test
+- [x] Cargo workspace member + core modules (identity/X3DH/DR/SK/v1_compat/FFI)
+- [x] Dependency/license audit document in crate README
+- [x] WASM build (`scripts/build-wasm.ps1`) + Flutter FFI smoke (`scripts/ffi-smoke.ps1`)
+- [x] X3DH agreement vector test (`tests/x3dh_vector.rs`) + unit roundtrips
 
 ---
 
