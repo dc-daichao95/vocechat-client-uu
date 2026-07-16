@@ -98,6 +98,7 @@ dependencies:
   cryptography: ^2.7.0
   # Pure-Dart P-256 ECDH (cryptography's DartEcdh throws UnimplementedError on Windows)
   pointycastle: ^3.9.1
+  ffi: ^2.1.0
   flutter_local_notifications: ^17.2.3
   local_notifier: ^0.1.6
   windows_taskbar: ^1.1.2

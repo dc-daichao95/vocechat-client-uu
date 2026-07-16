@@ -106,3 +106,10 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# E2EE v2 shared crypto core (voce_e2ee_core.dll) — Phase D
+set(VOCE_E2EE_DLL "${CMAKE_CURRENT_SOURCE_DIR}/libs/voce_e2ee_core.dll")
+if(EXISTS "${VOCE_E2EE_DLL}")
+  install(FILES "${VOCE_E2EE_DLL}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()

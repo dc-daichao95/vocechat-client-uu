@@ -38,6 +38,7 @@ import 'package:vocechat_client/models/local_kits.dart';
 import 'package:vocechat_client/services/file_handler.dart';
 import 'package:vocechat_client/services/file_handler/audio_file_handler.dart';
 import 'package:vocechat_client/services/e2e_crypto.dart';
+import 'package:vocechat_client/services/e2e_v2_identity.dart';
 import 'package:vocechat_client/services/persistent_connection/dio_sse.dart';
 import 'package:vocechat_client/services/persistent_connection/persistent_connection.dart';
 import 'package:vocechat_client/services/persistent_connection/sse.dart';
@@ -893,13 +894,29 @@ class VoceChatService {
       final uid = App.app.userDb?.uid;
       if (uid == null) return;
       E2eCrypto.resetSessionDistFlags();
-      final id = await E2eCrypto.ensureIdentity(uid);
-      await E2eApi(App.app.chatServerM.fullUrl).putIdentity(
-        deviceId: id.deviceId,
-        identityKeyPub: id.publicKeySpkiB64,
-      );
-      App.logger
-          .info('E2E identity published for uid=$uid device=${id.deviceId}');
+
+      var protocolVer = 1;
+      try {
+        final proto = await E2eApi(App.app.chatServerM.fullUrl).getProtocol();
+        if (proto.statusCode == 200 && proto.data is Map) {
+          final m = Map<String, dynamic>.from(proto.data as Map);
+          protocolVer = (m['e2e_protocol_ver'] as num?)?.toInt() ?? 1;
+        }
+      } catch (_) {
+        // Fall back to v1 publish if protocol endpoint unavailable.
+      }
+
+      if (protocolVer >= 2) {
+        await E2eV2Identity.bootstrapAndPublish(uid);
+      } else {
+        final id = await E2eCrypto.ensureIdentity(uid);
+        await E2eApi(App.app.chatServerM.fullUrl).putIdentity(
+          deviceId: id.deviceId,
+          identityKeyPub: id.publicKeySpkiB64,
+        );
+        App.logger
+            .info('E2E v1 identity published for uid=$uid device=${id.deviceId}');
+      }
     } catch (e) {
       App.logger.warning('E2E identity bootstrap failed: $e');
     }

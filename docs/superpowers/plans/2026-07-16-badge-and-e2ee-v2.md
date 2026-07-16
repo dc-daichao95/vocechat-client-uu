@@ -57,6 +57,14 @@
 - [x] Device-link start / package / complete / status + migration
 - [x] Docs: `docs/superpowers/plans/2026-07-16-e2ee-phase-c.md`
 
-### Task 4–6: DM v2 clients, channels, migration UI (Phases D)
+### Task 4: Phase D client binding — **IN PROGRESS 2026-07-16**
+
+- [x] Flutter FFI bridge + v2 identity publish when protocol ≥ 2
+- [x] Web WASM asset + v2 bootstrap path
+- [ ] DM Double Ratchet send/recv
+- [ ] Channel SK via core
+- [ ] Safety number / device-link UI
+
+### Task 5–6: channels, migration UI
 
 See design spec `docs/superpowers/specs/2026-07-16-badge-and-e2ee-v2-design.md`.
