@@ -187,13 +187,6 @@ class VoceSendService {
 
         if (wireType != typeE2e) {
           var recipients = await _collectIdentityPubs(e2eApi, [myUid, uid]);
-          if (recipients.isEmpty) {
-            final bundle = await e2eApi.getBundle(uid);
-            final peerPub = (bundle.data as Map)['identity_key_pub'] as String?;
-            if (peerPub != null && peerPub.isNotEmpty) {
-              recipients = [(uid: uid, identityKeyPub: peerPub)];
-            }
-          }
           // Skip v2 JSON pubs on the v1 ECDH path.
           recipients = recipients.where((r) {
             try {
@@ -203,12 +196,34 @@ class VoceSendService {
               return true;
             }
           }).toList();
+          if (!recipients.any((r) => r.uid == uid)) {
+            try {
+              final bundle = await e2eApi.getBundle(uid);
+              final peerPub =
+                  (bundle.data as Map)['identity_key_pub'] as String?;
+              if (peerPub != null && peerPub.isNotEmpty) {
+                try {
+                  jsonDecode(peerPub);
+                } catch (_) {
+                  recipients = [
+                    ...recipients,
+                    (uid: uid, identityKeyPub: peerPub)
+                  ];
+                }
+              }
+            } catch (_) {}
+          }
           final self = await E2eCrypto.ensureIdentity(myUid);
           if (!recipients.any((r) => r.identityKeyPub == self.publicKeySpkiB64)) {
             recipients = [
               ...recipients,
               (uid: myUid, identityKeyPub: self.publicKeySpkiB64)
             ];
+          }
+          if (!recipients.any((r) => r.uid == uid)) {
+            throw StateError(
+              'E2E: peer has no v1 identity (v2 encrypt unavailable). Open both clients once.',
+            );
           }
           final enc = await E2eCrypto.encryptTextForPeer(
             uid: myUid,
