@@ -49,6 +49,14 @@
 
 ---
 
-### Task 3–6: DM v2, channels, migration, docs (Phases C–D)
+### Task 3: Server Phase C — **DONE 2026-07-16**
+
+- [x] `GET /user/e2e/protocol`
+- [x] Identity/bundle require signed prekey when `e2e_protocol_ver >= 2`
+- [x] `E2E_UPGRADE_REQUIRED` on send when ver too low
+- [x] Device-link start / package / complete / status + migration
+- [x] Docs: `docs/superpowers/plans/2026-07-16-e2ee-phase-c.md`
+
+### Task 4–6: DM v2 clients, channels, migration UI (Phases D)
 
 See design spec `docs/superpowers/specs/2026-07-16-badge-and-e2ee-v2-design.md`.
