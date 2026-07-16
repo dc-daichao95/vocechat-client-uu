@@ -601,9 +601,8 @@ class E2eCrypto {
     try {
       final env = _unpack(content);
       if (env['v'] == 2 && env['alg'] == 'DR+AES-GCM') {
-        final sessionPeer = (fromUid != null && fromUid == uid)
-            ? (peerUid ?? 0)
-            : (fromUid ?? peerUid ?? 0);
+        // Session remote party is always the message sender (supports linked-device sync).
+        final sessionPeer = fromUid ?? peerUid ?? 0;
         final pt = await E2eV2Dm.decryptText(
           uid: uid,
           peerUid: sessionPeer,

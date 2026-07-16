@@ -131,38 +131,53 @@ class VoceSendService {
         // Prefer Double Ratchet when local + peer v2 material is ready.
         try {
           if (await E2eV2Dm.canUse(myUid)) {
-            final ids = await e2eApi.getIdentity(uid);
-            Map? v2Id;
-            if (ids.statusCode == 200 && ids.data is List) {
-              for (final row in ids.data as List) {
-                if (row is Map &&
-                    row['signed_prekey_pub'] != null &&
-                    '${row['signed_prekey_pub']}'.isNotEmpty) {
-                  v2Id = row;
-                  break;
+            final peerIds = await e2eApi.getIdentity(uid);
+            final selfIds = await e2eApi.getIdentity(myUid);
+            final rows = <Map>[];
+            void collect(Response r) {
+              if (r.statusCode == 200 && r.data is List) {
+                for (final row in r.data as List) {
+                  if (row is Map &&
+                      row['signed_prekey_pub'] != null &&
+                      '${row['signed_prekey_pub']}'.isNotEmpty) {
+                    rows.add(row);
+                  }
                 }
               }
             }
-            if (v2Id != null) {
-              final bundle = await e2eApi.getBundle(
-                uid,
-                deviceId: v2Id['device_id'] as String?,
-              );
-              if (bundle.statusCode == 200 &&
-                  bundle.data is Map &&
-                  E2eV2Dm.peerSupportsV2(bundle.data as Map)) {
-                final enc = await E2eV2Dm.encryptText(
-                  uid: myUid,
-                  peerUid: uid,
-                  plaintext: content,
-                  bundle: Map<String, dynamic>.from(bundle.data as Map),
+            collect(peerIds);
+            collect(selfIds);
+
+            final bundles = <Map>[];
+            for (final row in rows) {
+              try {
+                final ownerUid = (row['uid'] as num?)?.toInt() ?? uid;
+                final bundle = await e2eApi.getBundle(
+                  ownerUid,
+                  deviceId: row['device_id'] as String?,
                 );
-                if (enc != null) {
-                  wireContent = enc.content;
-                  wireType = typeE2e;
-                  props = {...enc.properties, "cid": localMid};
-                  e2eRequired = true;
+                if (bundle.statusCode == 200 &&
+                    bundle.data is Map &&
+                    E2eV2Dm.peerSupportsV2(bundle.data as Map)) {
+                  final b = Map<String, dynamic>.from(bundle.data as Map);
+                  b['uid'] = ownerUid;
+                  bundles.add(b);
                 }
+              } catch (_) {}
+            }
+
+            if (bundles.any((b) => (b['uid'] as num?)?.toInt() == uid)) {
+              final enc = await E2eV2Dm.encryptText(
+                uid: myUid,
+                peerUid: uid,
+                plaintext: content,
+                bundles: bundles,
+              );
+              if (enc != null) {
+                wireContent = enc.content;
+                wireType = typeE2e;
+                props = {...enc.properties, "cid": localMid};
+                e2eRequired = true;
               }
             }
           }
