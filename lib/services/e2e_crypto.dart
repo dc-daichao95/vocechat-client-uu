@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pointycastle/export.dart' as pc;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vocechat_client/app_consts.dart';
+import 'package:vocechat_client/services/e2e_pad.dart';
 import 'package:vocechat_client/services/e2e_v2_dm.dart';
 
 /// E2E v1 aligned with Web: P-256 ECDH + AES-GCM (DM) and channel sender keys.
@@ -268,13 +269,12 @@ class E2eCrypto {
     );
   }
 
-  static Map<String, dynamic> _props(String deviceId, String inner) => {
-        'e2e': true,
-        'e2e_ver': e2eVer,
-        'sender_device_id': deviceId,
-        'local_id': DateTime.now().millisecondsSinceEpoch,
-        'inner_content_type': inner,
-      };
+  static Map<String, dynamic> _props(String deviceId, String _inner) =>
+      E2ePad.minimalProps(
+        e2eVer: e2eVer,
+        senderDeviceId: deviceId,
+        localId: DateTime.now().millisecondsSinceEpoch,
+      );
 
   static String _pack(Map<String, dynamic> envelope) =>
       base64Encode(utf8.encode(jsonEncode(envelope)));
@@ -288,6 +288,7 @@ class E2eCrypto {
     required String plaintext,
     String? peerPublicKeyB64,
     List<({int uid, String identityKeyPub})>? recipients,
+    String mime = 'text/plain',
   }) async {
     final id = await ensureIdentity(uid);
     final list = <({int uid, String identityKeyPub})>[...(recipients ?? [])];
@@ -311,7 +312,7 @@ class E2eCrypto {
     final secret = SecretKey(mk);
     final iv = _randomBytes(12);
     final box = await _aes.encrypt(
-      utf8.encode(plaintext),
+      E2ePad.padMessage(mime, plaintext),
       secretKey: secret,
       nonce: iv,
     );
@@ -490,11 +491,13 @@ class E2eCrypto {
     required int gid,
     required String plaintext,
     required List<({int uid, String identityKeyPub})> members,
+    String mime = 'text/plain',
   }) async {
     final enc = await encryptTextForPeer(
       uid: uid,
       plaintext: plaintext,
       recipients: members,
+      mime: mime,
     );
     // Keep return shape for callers; needDist always false (user-level MK).
     return (
@@ -706,7 +709,13 @@ class E2eCrypto {
             mac: Mac(ct.sublist(ct.length - 16))),
         secretKey: aesKey,
       );
-      final text = utf8.decode(clear);
+      final clearBytes = Uint8List.fromList(clear);
+      late final String text;
+      try {
+        text = E2ePad.unpadMessage(clearBytes).text;
+      } catch (_) {
+        text = utf8.decode(clearBytes);
+      }
       final mkBytes = Uint8List.fromList(await aesKey.extractBytes());
       final fileMeta = env['file'];
       if (fileMeta is Map) {

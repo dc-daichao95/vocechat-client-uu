@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:vocechat_client/services/e2e_pad.dart';
 import 'package:vocechat_client/services/e2e_v2_core.dart';
 import 'package:vocechat_client/services/e2e_v2_identity.dart';
 
@@ -73,6 +74,7 @@ class E2eV2Dm {
     required int recipientUid,
     required Map bundle,
     required String plaintext,
+    String mime = 'text/plain',
   }) async {
     if (!peerSupportsV2(bundle)) return null;
     final deviceId = local['deviceId'] as String;
@@ -84,6 +86,7 @@ class E2eV2Dm {
     final identity = _parseIdentityPublic(bundle['identity_key_pub'] as String);
     if (identity == null) return null;
 
+    final paddedB64 = E2ePad.padMessageB64(mime, plaintext);
     final skKey = _sessionKey(myUid, deviceId, recipientUid, peerDevice);
     final existing = await _secure.read(key: skKey);
 
@@ -91,7 +94,7 @@ class E2eV2Dm {
     if (existing != null) {
       final r = core.call('ratchet_encrypt', {
         'state': jsonDecode(existing),
-        'plaintext': plaintext,
+        'plaintext_b64': paddedB64,
       });
       result = Map<String, dynamic>.from(r['result'] as Map);
     } else {
@@ -109,7 +112,7 @@ class E2eV2Dm {
           'one_time_prekey_b64': otk is Map ? otk['public_key'] : null,
           'one_time_prekey_id': otk is Map ? otk['key_id'] : null,
         },
-        'plaintext': plaintext,
+        'plaintext_b64': paddedB64,
       });
       result = Map<String, dynamic>.from(r['result'] as Map);
     }
@@ -139,6 +142,7 @@ class E2eV2Dm {
     required String plaintext,
     Map? bundle,
     List<Map>? bundles,
+    String mime = 'text/plain',
   }) async {
     final local = await _loadLocal(uid);
     if (local == null) return null;
@@ -168,6 +172,7 @@ class E2eV2Dm {
         recipientUid: recipientUid,
         bundle: b,
         plaintext: plaintext,
+        mime: mime,
       );
       if (copy != null) fanout.add(copy);
     }
@@ -202,14 +207,11 @@ class E2eV2Dm {
     final packed = base64Encode(utf8.encode(jsonEncode(envelope)));
     return (
       content: packed,
-      properties: <String, dynamic>{
-        'e2e': true,
-        'e2e_ver': 2,
-        'sender_device_id': deviceId,
-        'peer_device_ids': fanout.map((c) => c['device_id']).toList(),
-        'local_id': localId,
-        'inner_content_type': 'text/plain',
-      },
+      properties: E2ePad.minimalProps(
+        e2eVer: 2,
+        senderDeviceId: deviceId,
+        localId: localId,
+      ),
     );
   }
 
@@ -281,7 +283,7 @@ class E2eV2Dm {
         });
         final result = Map<String, dynamic>.from(r['result'] as Map);
         await _secure.write(key: skKey, value: jsonEncode(result['state']));
-        return result['plaintext'] as String?;
+        return _decodeDrPlaintext(result);
       }
 
       if (existing == null) return null;
@@ -293,10 +295,16 @@ class E2eV2Dm {
       });
       final result = Map<String, dynamic>.from(r['result'] as Map);
       await _secure.write(key: skKey, value: jsonEncode(result['state']));
-      return result['plaintext'] as String?;
+      return _decodeDrPlaintext(result);
     } catch (_) {
       return null;
     }
+  }
+
+  static String? _decodeDrPlaintext(Map result) {
+    final b64 = result['plaintext_b64'] as String?;
+    if (b64 != null) return E2ePad.unpadMessageB64(b64).text;
+    return result['plaintext'] as String?;
   }
 
   static bool isV2DrEnvelope(String content) {
