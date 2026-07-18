@@ -10,10 +10,14 @@ import 'package:path/path.dart' as p;
 import 'package:vocechat_client/api/lib/e2e_api.dart';
 import 'package:vocechat_client/api/lib/group_api.dart';
 import 'package:vocechat_client/api/lib/message_api.dart';
+import 'package:vocechat_client/api/lib/mls_api.dart';
 import 'package:vocechat_client/api/lib/resource_api.dart';
 import 'package:vocechat_client/api/lib/user_api.dart';
 import 'package:vocechat_client/services/e2e_crypto.dart';
 import 'package:vocechat_client/services/e2e_v2_dm.dart';
+import 'package:vocechat_client/services/e2e_v2_identity.dart';
+import 'package:vocechat_client/services/mls_channel_service.dart';
+import 'package:vocechat_client/services/mls_state_store.dart';
 import 'package:vocechat_client/api/models/msg/chat_msg.dart';
 import 'package:vocechat_client/api/models/msg/msg_normal.dart';
 import 'package:vocechat_client/api/models/msg/msg_reply.dart';
@@ -66,6 +70,17 @@ class VoceSendService {
   }
 
   VoceSendService._internal();
+
+  Future<MlsChannelService> _mlsChannelService(int uid) async {
+    final rawDeviceId = await E2eV2Identity.deviceId();
+    final deviceId = rawDeviceId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
+    return MlsChannelService(
+      uid: uid,
+      deviceId: deviceId,
+      delivery: MlsApiDelivery(MlsApi(App.app.chatServerM.fullUrl)),
+      state: MlsStateStore(uid: uid, deviceId: deviceId),
+    );
+  }
 
   /// Collect published identity pubs for [uids] (snake_case or camelCase).
   Future<List<({int uid, String identityKeyPub})>> _collectIdentityPubs(
@@ -532,56 +547,26 @@ class VoceSendService {
     final localMid = resendLocalMid ?? uuid();
     final myUid = App.app.userDb!.uid;
 
-    String wireContent = content;
-    String wireType = typeText;
-    Map<String, dynamic> props = {"cid": localMid, 'mentions': mentions};
-    var e2eRequired = false;
+    final Map<String, dynamic> props = {"cid": localMid, 'mentions': mentions};
+    late final int sequence;
     try {
       final gM = await GroupInfoDao().getGroupByGid(gid);
       final infoJson = gM != null
           ? (jsonDecode(gM.info) as Map<String, dynamic>)
           : <String, dynamic>{};
-      final e2eOn = infoJson['e2e_enabled'] != false;
       final memberIds = await _channelMemberUids(gM, infoJson);
-      if (e2eOn) {
-        e2eRequired = true;
-        final e2eApi = E2eApi(App.app.chatServerM.fullUrl);
-        await E2eCrypto.ensureIdentity(myUid);
-        final uids = <int>{myUid, ...memberIds};
-        var members = await _collectIdentityPubs(e2eApi, uids);
-        final self = await E2eCrypto.ensureIdentity(myUid);
-        if (!members.any((m) => m.identityKeyPub == self.publicKeySpkiB64)) {
-          members = [
-            ...members,
-            (uid: myUid, identityKeyPub: self.publicKeySpkiB64)
-          ];
-        }
-        if (members.isEmpty) {
-          throw StateError('E2E: no member identity keys for channel $gid');
-        }
-        final enc = await E2eCrypto.encryptTextForChannel(
-          uid: myUid,
-          gid: gid,
-          plaintext: content,
-          members: members,
-        );
-        wireContent = enc.content;
-        wireType = typeE2e;
-        props = {...enc.properties, "cid": localMid, 'mentions': mentions};
-      }
+      sequence = await (await _mlsChannelService(myUid))
+          .sendText(gid, content, <int>{myUid, ...memberIds});
     } catch (e) {
-      App.logger.severe("Channel E2E encrypt failed: $e");
-      if (e2eRequired) {
-        final ctx = navigatorKey.currentContext;
-        if (ctx != null) {
-          ScaffoldMessenger.of(ctx).showSnackBar(
-            SnackBar(content: Text('E2E encrypt failed: $e')),
-          );
-        }
-        return; // do not fall back to plaintext (server would reject)
+      App.logger.severe("MLS channel send failed: $e");
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null && ctx.mounted) {
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(content: Text('End-to-end encrypted send failed: $e')),
+        );
       }
+      return;
     }
-
     final chatMsgDao = ChatMsgDao();
 
     final detail = MsgNormal(
@@ -601,36 +586,10 @@ class VoceSendService {
       final toBeFired = ChatMsgM.fromMsg(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
-      final Future<Response<int>> sendFuture = wireType == typeE2e
-          ? GroupApi().sendE2eMsg(gid, wireContent, props)
-          : GroupApi().sendTextMsg(gid, content, detail.properties);
-
-      await sendFuture.then(
-        (response) async {
-          if (response.statusCode == 200) {
-            final mid = response.data!;
-            message.mid = mid;
-            chatMsgM = ChatMsgM.fromMsg(message, localMid, MsgStatus.success);
-            await chatMsgDao.update(chatMsgM).then((value) {
-              App.app.chatService.fireMsg(chatMsgM, true);
-            }).onError((error, stackTrace) {
-              App.logger.severe(error);
-              App.app.chatService
-                  .fireMsg(chatMsgM..status = MsgStatus.fail, true);
-            });
-          } else {
-            App.logger.severe(
-                "Message send failed, statusCode: ${response.statusCode}");
-            _notifyE2eRequired(response);
-            App.app.chatService
-                .fireMsg(chatMsgM..status = MsgStatus.fail, true);
-          }
-        },
-      ).onError((error, stackTrace) {
-        App.logger.severe(error);
-        _notifyE2eRequired(error);
-        App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-      });
+      message.mid = mlsDisplayMid(sequence);
+      chatMsgM = ChatMsgM.fromMsg(message, localMid, MsgStatus.success);
+      await chatMsgDao.update(chatMsgM);
+      App.app.chatService.fireMsg(chatMsgM, true);
     });
   }
 

@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import 'package:vocechat_client/event_bus_objects/private_channel_link_event.dart';
+import 'package:vocechat_client/event_bus_objects/push_to_chat_event.dart';
 import 'package:vocechat_client/globals.dart' as globals;
 import 'package:vocechat_client/globals.dart';
 import 'package:vocechat_client/shared_funcs.dart';
@@ -14,6 +15,9 @@ import 'package:vocechat_client/ui/chats/chats/chats_page.dart';
 import 'package:vocechat_client/ui/chats/chats/desktop/desktop_shell.dart';
 import 'package:vocechat_client/ui/contact/contacts_page.dart';
 import 'package:vocechat_client/ui/settings/settings_page.dart';
+import 'package:vocechat_client/ui/tools/mobile_tab_controller.dart';
+import 'package:vocechat_client/ui/tools/conversation_target.dart';
+import 'package:vocechat_client/ui/tools/tools_page.dart';
 
 class ChatsMainPage extends StatefulWidget {
   static const route = '/chats';
@@ -29,12 +33,7 @@ class ChatsMainPage extends StatefulWidget {
 }
 
 class _ChatsMainPageState extends State<ChatsMainPage> {
-  final List<Widget> _pageOptions = <Widget>[
-    const ChatsPage(),
-    const ContactsPage(),
-    // const PulseSettingsPage(),
-    const SettingPage()
-  ];
+  final MobileTabController _mobileTabs = MobileTabController();
 
   ValueNotifier<bool> disableGesture = ValueNotifier(false);
 
@@ -44,12 +43,20 @@ class _ChatsMainPageState extends State<ChatsMainPage> {
   }
 
   @override
+  void dispose() {
+    _mobileTabs.dispose();
+    disableGesture.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final Uri? invitationLink =
         ModalRoute.of(context)!.settings.arguments as Uri?;
     if (invitationLink != null) {
       eventBus.fire(PrivateChannelInvitationLinkEvent(invitationLink));
     }
+    final tabDefinitions = _buildMobileTabs(context);
 
     return ValueListenableBuilder<bool>(
         valueListenable: disableGesture,
@@ -59,40 +66,67 @@ class _ChatsMainPageState extends State<ChatsMainPage> {
             child: Platform.isWindows
                 ? DesktopShell(disableGesture: this.disableGesture)
                 : Scaffold(
-              drawer: SharedFuncs.hasPreSetServerUrl()
-                  ? null
-                  : _buildServerSwitchDrawer(),
-              body: CupertinoTabScaffold(
-                  tabBar: CupertinoTabBar(
-                      height: 60,
-                      activeColor: widget._activeColor,
-                      inactiveColor: widget._defaultColor,
-                      items: [
-                        _buildChatsIcon(),
-                        BottomNavigationBarItem(
-                          icon: Padding(
-                            padding: const EdgeInsets.only(
-                                top: 8, left: 4, right: 4),
-                            child:
-                                Icon(AppIcons.contact, size: widget._iconsize),
-                          ),
-                          label: AppLocalizations.of(context)!.tabContacts,
-                        ),
-                        BottomNavigationBarItem(
-                          icon: Padding(
-                              padding: const EdgeInsets.only(
-                                  top: 8, left: 4, right: 4),
-                              child: Icon(AppIcons.setting,
-                                  size: widget._iconsize)),
-                          label: AppLocalizations.of(context)!.tabSettings,
-                        ),
-                      ]),
-                  tabBuilder: (context, index) {
-                    return _pageOptions[index];
-                  }),
-            ),
+                    drawer: SharedFuncs.hasPreSetServerUrl()
+                        ? null
+                        : _buildServerSwitchDrawer(),
+                    body: CupertinoTabScaffold(
+                        controller: _mobileTabs.cupertinoController,
+                        tabBar: CupertinoTabBar(
+                            height: 60,
+                            activeColor: widget._activeColor,
+                            inactiveColor: widget._defaultColor,
+                            items:
+                                tabDefinitions.map((tab) => tab.item).toList()),
+                        tabBuilder: (context, index) {
+                          return tabDefinitions[index].page;
+                        }),
+                  ),
           );
         });
+  }
+
+  List<_MobileTabDefinition> _buildMobileTabs(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return mobileTabOrder.map((kind) {
+      switch (kind) {
+        case MobileTabKind.chats:
+          return _MobileTabDefinition(const ChatsPage(), _buildChatsIcon());
+        case MobileTabKind.contacts:
+          return _MobileTabDefinition(
+            const ContactsPage(),
+            _tabItem(AppIcons.contact, l10n.tabContacts),
+          );
+        case MobileTabKind.tools:
+          return _MobileTabDefinition(
+            ToolsPage(onLocate: _locateFromTools),
+            _tabItem(Icons.widgets_outlined, l10n.tabTools),
+          );
+        case MobileTabKind.settings:
+          return _MobileTabDefinition(
+            const SettingPage(),
+            _tabItem(AppIcons.setting, l10n.tabSettings),
+          );
+      }
+    }).toList();
+  }
+
+  BottomNavigationBarItem _tabItem(IconData icon, String label) {
+    return BottomNavigationBarItem(
+      icon: Padding(
+        padding: const EdgeInsets.only(top: 8, left: 4, right: 4),
+        child: Icon(icon, size: widget._iconsize),
+      ),
+      label: label,
+    );
+  }
+
+  Future<void> _locateFromTools(ConversationTarget target) async {
+    _mobileTabs.select(mobileTabOrder.indexOf(MobileTabKind.chats));
+    eventBus.fire(PushToChatEvent(
+      uid: target.uid,
+      gid: target.gid,
+      mid: target.mid,
+    ));
   }
 
   BottomNavigationBarItem _buildChatsIcon() {
@@ -167,4 +201,11 @@ class _ChatsMainPageState extends State<ChatsMainPage> {
       },
     );
   }
+}
+
+class _MobileTabDefinition {
+  final Widget page;
+  final BottomNavigationBarItem item;
+
+  const _MobileTabDefinition(this.page, this.item);
 }

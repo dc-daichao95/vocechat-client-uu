@@ -1,0 +1,101 @@
+name: Build pure MLS clients
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["mls-v2-*"]
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: dc-daichao95/vocechat-server-rust-uu
+          path: server
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.19.6
+      - shell: pwsh
+        run: |
+          cargo build --manifest-path server/crates/voce-e2ee-core/Cargo.toml --release --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory -Force windows/libs
+          Copy-Item server/target/x86_64-pc-windows-msvc/release/voce_e2ee_core.dll windows/libs/voce_e2ee_core.dll
+          flutter pub get
+          flutter build windows --release
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath vocechat-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vocechat-windows
+          path: vocechat-windows.zip
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: dc-daichao95/vocechat-server-rust-uu
+          path: server
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.19.6
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r26d
+      - run: cargo install cargo-ndk --locked
+      - env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --manifest-path server/crates/voce-e2ee-core/Cargo.toml --release
+          flutter pub get
+      - shell: bash
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_B64"
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/android-release.jks"
+          ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/android-release.jks" flutter build apk --release --target-platform android-arm64,android-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vocechat-android
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+  ios-core:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: dc-daichao95/vocechat-server-rust-uu
+          path: server
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - run: |
+          cargo build --manifest-path server/crates/voce-e2ee-core/Cargo.toml --release --target aarch64-apple-ios
+          cargo build --manifest-path server/crates/voce-e2ee-core/Cargo.toml --release --target aarch64-apple-ios-sim
+          mkdir -p ios/Frameworks
+          xcodebuild -create-xcframework \
+            -library server/target/aarch64-apple-ios/release/libvoce_e2ee_core.a \
+            -library server/target/aarch64-apple-ios-sim/release/libvoce_e2ee_core.a \
+            -output ios/Frameworks/VoceE2eeCore.xcframework
+          flutter pub get
+          flutter build ios --release --no-codesign
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voce-e2ee-ios-core
+          path: |
+            ios/Frameworks/VoceE2eeCore.xcframework
+            build/ios/iphoneos/Runner.app

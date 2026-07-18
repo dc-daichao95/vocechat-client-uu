@@ -34,6 +34,11 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
+def releaseStoreFile = System.getenv('ANDROID_KEYSTORE_FILE') ?: keystoreProperties['storeFile']
+def releaseStorePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD') ?: keystoreProperties['storePassword']
+def releaseKeyAlias = System.getenv('ANDROID_KEY_ALIAS') ?: keystoreProperties['keyAlias']
+def releaseKeyPassword = System.getenv('ANDROID_KEY_PASSWORD') ?: keystoreProperties['keyPassword']
+
    
 
 
@@ -58,6 +63,9 @@ android {
         applicationId "com.privoce.vocechatclient"
         //minSdkVersion flutter.minSdkVersion
         multiDexEnabled true
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
         // manifestPlaceholders += [pdftronLicenseKey:PDFTRON_LICENSE_KEY]
         targetSdkVersion 34
         versionCode flutterVersionCode.toInteger()
@@ -72,10 +80,10 @@ android {
 
     signingConfigs {
        release {
-           keyAlias keystoreProperties['keyAlias']
-           keyPassword keystoreProperties['keyPassword']
-           storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
-           storePassword keystoreProperties['storePassword']
+           keyAlias releaseKeyAlias
+           keyPassword releaseKeyPassword
+           storeFile releaseStoreFile ? file(releaseStoreFile) : null
+           storePassword releaseStorePassword
        }
    }
    buildTypes {

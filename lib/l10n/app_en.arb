@@ -397,5 +397,20 @@
     "settingsPageMyInfo":"My Info",
     "settingsPageAccountSettings": "Account Settings",
     "settingsPageAbout": "About",
-    "settingsPageLogout": "Logout"
+    "settingsPageLogout": "Logout",
+
+    "tabTools": "Tools",
+    "toolsTitle": "Tools",
+    "toolsSaved": "Saved",
+    "toolsSavedDescription": "View saved messages from every conversation",
+    "toolsFiles": "Files",
+    "toolsFilesDescription": "Browse and download shared files",
+    "toolsGlobalSearch": "Global Search",
+    "toolsGlobalSearchDescription": "Search messages across conversations",
+    "toolsLocate": "Locate message",
+    "toolsSourceUnavailable": "The source message is unavailable",
+    "toolsEmpty": "Nothing here yet",
+    "toolsRetry": "Retry",
+    "toolsRefresh": "Refresh",
+    "toolsE2eSearchLimitation": "Encrypted messages can only be searched after this device has decrypted them."
 }

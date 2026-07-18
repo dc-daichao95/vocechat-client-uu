@@ -122,10 +122,10 @@ class _ChatsPageState extends State<ChatsPage>
 
       if (!initialListDataCompleter.isCompleted) {
         await initialListDataCompleter.future.then((_) {
-          onTap(chatTileData!);
+          onTap(chatTileData!, locateMid: event.mid);
         });
       } else {
-        onTap(chatTileData);
+        onTap(chatTileData, locateMid: event.mid);
       }
     });
   }
@@ -514,12 +514,15 @@ class _ChatsPageState extends State<ChatsPage>
     }
   }
 
-  void onTap(ChatTileData tileData) async {
+  void onTap(ChatTileData tileData, {int? locateMid}) async {
     if (tileData.isChannel) {
       GlobalKey<AppMentionsState> mentionsKey = GlobalKey<AppMentionsState>();
       ChatPageController controller =
           ChatPageController.channel(groupInfoMNotifier: tileData.groupInfoM!);
-      controller.prepare().then((value) {
+      controller.prepare().then((value) async {
+        if (locateMid != null) {
+          await controller.locateMid(locateMid);
+        }
         final unreadCount = tileData.unreadCount.value;
         unreadCountSum.value -= unreadCount;
         Navigator.push(
@@ -549,7 +552,10 @@ class _ChatsPageState extends State<ChatsPage>
       ChatPageController controller =
           ChatPageController.user(userInfoMNotifier: tileData.userInfoM!);
 
-      controller.prepare().then((value) {
+      controller.prepare().then((value) async {
+        if (locateMid != null) {
+          await controller.locateMid(locateMid);
+        }
         final unreadCount = tileData.unreadCount.value;
         unreadCountSum.value -= unreadCount;
         Navigator.push(

@@ -400,5 +400,20 @@
     "settingsPageMyInfo":"我的信息",
     "settingsPageAccountSettings": "账号设置",
     "settingsPageAbout": "关于我们",
-    "settingsPageLogout": "退出登录"
+    "settingsPageLogout": "退出登录",
+
+    "tabTools": "工具",
+    "toolsTitle": "工具",
+    "toolsSaved": "收藏",
+    "toolsSavedDescription": "查看所有会话中收藏的消息",
+    "toolsFiles": "文件",
+    "toolsFilesDescription": "浏览和下载会话文件",
+    "toolsGlobalSearch": "全局搜索",
+    "toolsGlobalSearchDescription": "搜索所有会话中的消息",
+    "toolsLocate": "定位消息",
+    "toolsSourceUnavailable": "原消息不可用",
+    "toolsEmpty": "暂无内容",
+    "toolsRetry": "重试",
+    "toolsRefresh": "刷新",
+    "toolsE2eSearchLimitation": "加密消息只有在本设备成功解密后才能被搜索。"
 }

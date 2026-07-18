@@ -16,14 +16,16 @@ import 'package:vocechat_client/ui/app_colors.dart';
 import 'package:vocechat_client/ui/app_icons_icons.dart';
 import 'package:vocechat_client/ui/app_text_styles.dart';
 import 'package:vocechat_client/ui/chats/chat/message_tile/saved_bubble.dart';
+import 'package:vocechat_client/ui/tools/conversation_target.dart';
 import 'package:vocechat_client/ui/widgets/empty_content_placeholder.dart';
 
 class SavedItemPage extends StatefulWidget {
   final int? gid;
   final int? uid;
+  final Future<void> Function(ConversationTarget target)? onLocate;
 
-  SavedItemPage({this.gid, this.uid}) {
-    assert((gid != null && uid == null) || (gid == null && uid != null));
+  SavedItemPage({super.key, this.gid, this.uid, this.onLocate}) {
+    assert(gid == null || uid == null);
   }
 
   @override
@@ -41,6 +43,12 @@ class _SavedItemPageState extends State<SavedItemPage> {
     super.initState();
 
     _refreshSavedList();
+  }
+
+  @override
+  void dispose() {
+    isLoading.dispose();
+    super.dispose();
   }
 
   @override
@@ -116,10 +124,28 @@ class _SavedItemPageState extends State<SavedItemPage> {
                                     foregroundColor: Colors.white,
                                   )
                                 ]),
-                            child: SavedBubble(
-                                archive: archive,
-                                filePath: filePath,
-                                getSavedFiles: getSavedFiles)),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                SavedBubble(
+                                    archive: archive,
+                                    filePath: filePath,
+                                    getSavedFiles: getSavedFiles),
+                                if (_targetFor(archive) != null &&
+                                    widget.onLocate != null)
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: TextButton.icon(
+                                      onPressed: () => widget
+                                          .onLocate!(_targetFor(archive)!),
+                                      icon: const Icon(Icons.my_location,
+                                          size: 18),
+                                      label: Text(AppLocalizations.of(context)!
+                                          .toolsLocate),
+                                    ),
+                                  ),
+                              ],
+                            )),
                       ),
                     );
                   })),
@@ -136,6 +162,7 @@ class _SavedItemPageState extends State<SavedItemPage> {
           isDangerAction: true,
           action: () async {
             final res = await _onDelete(id);
+            if (!mounted) return;
             if (res) {
               final idx = savedList.indexWhere((element) => element.id == id);
               if (idx != -1) {
@@ -165,6 +192,7 @@ class _SavedItemPageState extends State<SavedItemPage> {
       }
     } catch (e) {
       App.logger.severe(e);
+      if (!mounted) return false;
       showAppAlert(
           context: context,
           title: AppLocalizations.of(context)!.savedPageDeleteErrorTitle,
@@ -199,9 +227,27 @@ class _SavedItemPageState extends State<SavedItemPage> {
       if (l != null) {
         savedList = l;
       }
+    } else {
+      savedList = await SavedDao().list(orderBy: '${SavedM.F_createdAt} DESC');
     }
     isLoading.value = false;
     setState(() {});
+  }
+
+  ConversationTarget? _targetFor(dynamic archive) {
+    if (archive == null || archive.messages.isEmpty) return null;
+    final message = archive.messages.first;
+    if (message.mid <= 0) return null;
+    final source = message.source;
+    final gid = source['gid'];
+    if (gid is num && gid.toInt() > 0) {
+      return ConversationTarget.group(gid: gid.toInt(), mid: message.mid);
+    }
+    final uid = source['uid'];
+    if (uid is num && uid.toInt() > 0) {
+      return ConversationTarget.direct(uid: uid.toInt(), mid: message.mid);
+    }
+    return null;
   }
 
   /// Fetch Ids and retrieve all saved archives.

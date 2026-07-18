@@ -10,9 +10,7 @@ typedef _CallDart = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _FreeNative = Void Function(Pointer<Utf8>);
 typedef _FreeDart = void Function(Pointer<Utf8>);
 
-/// Thin FFI bridge to `voce_e2ee_core` (Phase D).
-///
-/// Windows: loads `voce_e2ee_core.dll` next to the executable (or `windows/libs`).
+/// Thin cross-platform FFI bridge to the shared Rust crypto core.
 class E2eV2Core {
   E2eV2Core._();
   static final E2eV2Core instance = E2eV2Core._();
@@ -32,21 +30,26 @@ class E2eV2Core {
       _loadError = 'E2E v2 FFI not available on web';
       return false;
     }
-    if (!Platform.isWindows) {
-      _loadError = 'E2E v2 FFI currently wired for Windows only';
-      return false;
-    }
     try {
-      final dll = _resolveDll();
-      if (dll == null) {
-        _loadError = 'voce_e2ee_core.dll not found';
+      if (Platform.isIOS || Platform.isMacOS) {
+        _lib = DynamicLibrary.process();
+      } else if (Platform.isAndroid) {
+        _lib = DynamicLibrary.open('libvoce_e2ee_core.so');
+      } else if (Platform.isLinux) {
+        _lib = DynamicLibrary.open('libvoce_e2ee_core.so');
+      } else if (Platform.isWindows) {
+        final dll = _resolveWindowsDll();
+        if (dll == null) {
+          _loadError = 'voce_e2ee_core.dll not found';
+          return false;
+        }
+        _lib = DynamicLibrary.open(dll);
+      } else {
+        _loadError = 'The MLS core does not support this platform';
         return false;
       }
-      _lib = DynamicLibrary.open(dll);
-      _call = _lib!
-          .lookupFunction<_CallNative, _CallDart>('voce_e2ee_call');
-      _free = _lib!
-          .lookupFunction<_FreeNative, _FreeDart>('voce_e2ee_free');
+      _call = _lib!.lookupFunction<_CallNative, _CallDart>('voce_e2ee_call');
+      _free = _lib!.lookupFunction<_FreeNative, _FreeDart>('voce_e2ee_free');
       return true;
     } catch (e) {
       _loadError = e.toString();
@@ -54,7 +57,7 @@ class E2eV2Core {
     }
   }
 
-  String? _resolveDll() {
+  String? _resolveWindowsDll() {
     final exeDir = File(Platform.resolvedExecutable).parent.path;
     final candidates = <String>[
       '$exeDir${Platform.pathSeparator}voce_e2ee_core.dll',
