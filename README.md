@@ -25,6 +25,7 @@ VoceChat 自托管服务器的 Flutter 客户端。
 ## 文档入口
 - [AGENTS.md](AGENTS.md)：仓库协作规则、变更边界和 Agent / 开发者执行约束。
 - [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md)：项目现状、架构证据、安全风险、验证边界与分阶段路线图。
+- [docs/WINDOWS_RELEASE_BUILD_PROMPT.md](docs/WINDOWS_RELEASE_BUILD_PROMPT.md)：可直接交给 Windows 构建环境的 E2EE v2 release 构建与校验 Prompt。
 
 开始修改前请先阅读这两份文档。README 只提供快速入口，不替代完整报告。
 
