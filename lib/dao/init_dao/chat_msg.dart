@@ -164,6 +164,23 @@ class ChatMsgM extends Equatable with M {
     }
   }
 
+  /// True for envelopes, pending decrypt, or successfully decrypted gen-2 msgs.
+  /// Wire props use `e2e_version`/`protocol`; UI must not treat those as plaintext.
+  bool get isE2eMarkedMsg {
+    try {
+      final map = json.decode(detail) as Map;
+      if (map["content_type"] == typeE2eV2) return true;
+      final props = map["properties"];
+      if (props is! Map) return false;
+      if (props["e2e"] == true || props["e2e_decrypted"] == true) return true;
+      if (props["e2e_ver"] != null || props["e2e_version"] != null) return true;
+      final protocol = props["protocol"];
+      return protocol == "dr" || protocol == "mls";
+    } catch (_) {
+      return false;
+    }
+  }
+
   bool get isMarkdownMsg {
     try {
       final type = json.decode(detail)["content_type"] as String?;

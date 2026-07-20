@@ -188,7 +188,11 @@ class VoceSendService {
                 wireContent = enc.content;
                 wireType = typeE2eV2;
                 v2Route = enc.properties;
-                props = {...enc.properties.toJson(), "cid": localMid};
+                props = {
+                  ...enc.properties.toJson(),
+                  "cid": localMid,
+                  "e2e": true,
+                };
                 e2eRequired = true;
               }
             }
@@ -491,7 +495,13 @@ class VoceSendService {
     final localMid = resendLocalMid ?? uuid();
     final myUid = App.app.userDb!.uid;
 
-    final Map<String, dynamic> props = {"cid": localMid, 'mentions': mentions};
+    final Map<String, dynamic> props = {
+      "cid": localMid,
+      'mentions': mentions,
+      'e2e': true,
+      'protocol': 'mls',
+      'e2e_version': 2,
+    };
     late final int canonicalMid;
     try {
       final gM = await GroupInfoDao().getGroupByGid(gid);

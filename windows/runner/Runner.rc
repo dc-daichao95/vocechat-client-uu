@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.privoce" "\0"
-            VALUE "FileDescription", "vocechat_client" "\0"
+            VALUE "CompanyName", "VoceChat" "\0"
+            VALUE "FileDescription", "VoceChat" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "vocechat_client" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.privoce. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 VoceChat. All rights reserved." "\0"
             VALUE "OriginalFilename", "vocechat_client.exe" "\0"
-            VALUE "ProductName", "vocechat_client" "\0"
+            VALUE "ProductName", "VoceChat" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

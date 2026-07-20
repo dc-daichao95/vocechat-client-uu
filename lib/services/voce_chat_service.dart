@@ -1756,6 +1756,9 @@ class VoceChatService {
     final properties = Map<String, dynamic>.from(
         (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
     properties.remove('e2e_decrypt_failed');
+    // Keep lock badge after content_type is rewritten to text/markdown/file.
+    properties['e2e'] = true;
+    properties['e2e_decrypted'] = true;
     if (kind == 5 || kind == 6 || kind == 7) {
       final descriptor = await E2eV2Attachment.decodeDescriptor(body);
       properties.addAll({

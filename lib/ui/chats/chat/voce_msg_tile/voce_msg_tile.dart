@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -289,13 +288,9 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
   Widget _buildTitle(BuildContext context) {
     final msg = widget.tileData.chatMsgMNotifier.value;
     final contentType = msg.detailContentTypeStr;
-    bool wasE2e = contentType == typeE2eV2;
-    try {
-      final props = json.decode(msg.detail)['properties'];
-      if (props is Map && (props['e2e'] == true || props['e2e_ver'] != null)) {
-        wasE2e = true;
-      }
-    } catch (_) {}
+    // Gen-2 wire uses `e2e_version` / `protocol`; legacy used `e2e` / `e2e_ver`.
+    // After decrypt, content_type becomes text/markdown/file — still mark locked.
+    final wasE2e = msg.isE2eMarkedMsg;
     List<Widget> titleRowWidgets = [
       Flexible(
         child: Text(

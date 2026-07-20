@@ -644,11 +644,9 @@ class _VoceChatPageState extends State<VoceChatPage>
     }
 
     if (content.isNotEmpty) Clipboard.setData(ClipboardData(text: content));
-    Navigator.of(context).pop();
   }
 
   void _onTapPin(ChatMsgM chatMsgM, bool toPin) async {
-    Navigator.of(context).pop();
     final gid = chatMsgM.gid;
     final mid = chatMsgM.mid;
 
@@ -667,18 +665,13 @@ class _VoceChatPageState extends State<VoceChatPage>
     midList.add(chatMsgM.mid);
     try {
       final savedApi = SavedApi();
-      await savedApi.createSaved(midList).then((value) {
-        Navigator.of(context).pop();
-      });
+      await savedApi.createSaved(midList);
     } catch (e) {
       App.logger.severe(e);
-      Navigator.of(context).pop();
     }
   }
 
   void _onTapTileForward(MsgTileData tileData) async {
-    Navigator.of(context).pop();
-
     final chatMsgM = tileData.chatMsgMNotifier.value;
 
     if (chatMsgM.detailContentType == MsgContentType.archive) {
@@ -941,38 +934,10 @@ class _VoceChatPageState extends State<VoceChatPage>
 
             return GestureDetector(
                 key: msgKey,
-                onLongPress: () {
-                  showModalBottomSheet(
-                    context: context,
-                    isScrollControlled: true,
-                    shape: const RoundedRectangleBorder(
-                        borderRadius: BorderRadius.only(
-                            topLeft: Radius.circular(8),
-                            topRight: Radius.circular(8))),
-                    builder: (context) {
-                      return MsgActionsSheet(
-                          existingReactions: tileData
-                              .chatMsgMNotifier.value.reactionData?.reactionSet,
-                          onReaction: (reaction) {
-                            VoceSendService()
-                                .sendReaction(
-                                    tileData.chatMsgMNotifier.value, reaction)
-                                .then((succeed) {
-                              Navigator.pop(context);
-                              if (!succeed) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content: Text(
-                                            AppLocalizations.of(context)!
-                                                .networkError)));
-                              }
-                            });
-                          },
-                          chatMsgM: tileData.chatMsgMNotifier.value,
-                          actions: _buildOldLongPressActions(tileData));
-                    },
-                  );
-                },
+                onLongPress: () => _showMsgActionsSheet(tileData),
+                // Desktop: right-click opens actions (long-press is mobile-oriented).
+                onSecondaryTapDown: (details) =>
+                    _showMsgActionsMenu(tileData, details.globalPosition),
                 child: msgTile);
           },
         ),
@@ -980,17 +945,91 @@ class _VoceChatPageState extends State<VoceChatPage>
     );
   }
 
+  bool get _isDesktopShell =>
+      Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+
+  void _showMsgActionsSheet(MsgTileData tileData) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(8), topRight: Radius.circular(8))),
+      builder: (context) {
+        return MsgActionsSheet(
+            existingReactions:
+                tileData.chatMsgMNotifier.value.reactionData?.reactionSet,
+            onReaction: (reaction) {
+              VoceSendService()
+                  .sendReaction(tileData.chatMsgMNotifier.value, reaction)
+                  .then((succeed) {
+                Navigator.pop(context);
+                if (!succeed) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content:
+                          Text(AppLocalizations.of(context)!.networkError)));
+                }
+              });
+            },
+            chatMsgM: tileData.chatMsgMNotifier.value,
+            actions: _buildOldLongPressActions(tileData, popRoute: true));
+      },
+    );
+  }
+
+  Future<void> _showMsgActionsMenu(
+      MsgTileData tileData, Offset globalPosition) async {
+    if (!_isDesktopShell) {
+      _showMsgActionsSheet(tileData);
+      return;
+    }
+    final actions = _buildOldLongPressActions(tileData, popRoute: false);
+    if (actions.isEmpty) return;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final selected = await showMenu<int>(
+      context: context,
+      position: RelativeRect.fromRect(
+        globalPosition & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        for (var i = 0; i < actions.length; i++)
+          PopupMenuItem<int>(
+            value: i,
+            child: Row(
+              children: [
+                Icon(actions[i].icon, size: 20, color: AppColors.grey600),
+                const SizedBox(width: 12),
+                Text(actions[i].title),
+              ],
+            ),
+          ),
+      ],
+    );
+    if (!mounted || selected == null) return;
+    actions[selected].onTap();
+  }
+
   /// Build the actions for message tile long press gesture.
   ///
   /// It is an old version of [_buildPressDownActions]. To be replaced after
   /// the development and UI debug of [VoceContextMenu] finishes.
-  List<MsgActionTile> _buildOldLongPressActions(MsgTileData tileData) {
+  ///
+  /// [popRoute] should be true when actions run inside a modal bottom sheet.
+  List<MsgActionTile> _buildOldLongPressActions(MsgTileData tileData,
+      {bool popRoute = true}) {
     final isSuccessSent = tileData.status.value == MsgStatus.success;
     final isSelf = SharedFuncs.isSelf(tileData.userInfoM.uid);
     final isAdmin = tileData.userInfoM.userInfo.isAdmin;
     final isChannelOwner =
         SharedFuncs.isSelf(widget.groupInfoNotifier?.value.groupInfo.owner);
     final chatMsgM = tileData.chatMsgMNotifier.value;
+
+    void maybePop() {
+      if (popRoute && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    }
 
     List<MsgActionTile> actions = [];
 
@@ -1000,7 +1039,7 @@ class _VoceChatPageState extends State<VoceChatPage>
           icon: AppIcons.reply,
           title: AppLocalizations.of(context)!.reply,
           onTap: () {
-            Navigator.pop(context);
+            maybePop();
             setReactionData(tileData, ReactionType.reply);
           }));
     }
@@ -1011,7 +1050,7 @@ class _VoceChatPageState extends State<VoceChatPage>
           icon: AppIcons.edit,
           title: AppLocalizations.of(context)!.edit,
           onTap: () {
-            Navigator.pop(context);
+            maybePop();
             setReactionData(tileData, ReactionType.edit);
           }));
     }
@@ -1021,7 +1060,10 @@ class _VoceChatPageState extends State<VoceChatPage>
       actions.add(MsgActionTile(
           icon: AppIcons.copy,
           title: AppLocalizations.of(context)!.copy,
-          onTap: () => _onTapCopy(chatMsgM)));
+          onTap: () {
+            maybePop();
+            _onTapCopy(chatMsgM);
+          }));
     }
 
     // Pin
@@ -1034,7 +1076,10 @@ class _VoceChatPageState extends State<VoceChatPage>
           title: isPinned > -1
               ? AppLocalizations.of(context)!.unpin
               : AppLocalizations.of(context)!.pin,
-          onTap: () => _onTapPin(chatMsgM, isPinned == -1)));
+          onTap: () {
+            maybePop();
+            _onTapPin(chatMsgM, isPinned == -1);
+          }));
     }
 
     // Save
@@ -1042,7 +1087,10 @@ class _VoceChatPageState extends State<VoceChatPage>
       actions.add(MsgActionTile(
           icon: AppIcons.bookmark,
           title: AppLocalizations.of(context)!.save,
-          onTap: () => _onTapSave(chatMsgM)));
+          onTap: () {
+            maybePop();
+            _onTapSave(chatMsgM);
+          }));
     }
 
     // Forward
@@ -1050,7 +1098,10 @@ class _VoceChatPageState extends State<VoceChatPage>
       actions.add(MsgActionTile(
           icon: AppIcons.forward,
           title: AppLocalizations.of(context)!.forward,
-          onTap: () => _onTapTileForward(tileData)));
+          onTap: () {
+            maybePop();
+            _onTapTileForward(tileData);
+          }));
     }
 
     // Select
@@ -1058,7 +1109,7 @@ class _VoceChatPageState extends State<VoceChatPage>
         icon: AppIcons.select,
         title: AppLocalizations.of(context)!.select,
         onTap: () {
-          Navigator.pop(context);
+          maybePop();
           selectEnabled.value = true;
         }));
 
@@ -1068,7 +1119,7 @@ class _VoceChatPageState extends State<VoceChatPage>
           icon: AppIcons.delete,
           title: AppLocalizations.of(context)!.delete,
           onTap: () {
-            Navigator.of(context).pop();
+            maybePop();
             delete(chatMsgM);
           }));
     }
