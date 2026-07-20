@@ -57,8 +57,10 @@ class ChatPageController {
   ValueNotifier<bool> isLoadingNotifier = ValueNotifier(false);
   Set<VoidCallback> _scrollToBottomListeners = {};
   ValueNotifier<bool> isLoadingHistory = ValueNotifier(false);
+
   /// Mid to briefly highlight after locate-from-search.
   final ValueNotifier<int?> highlightMidNotifier = ValueNotifier(null);
+
   /// Mid the chat page should scroll into view once present in the list.
   final ValueNotifier<int?> scrollToMidNotifier = ValueNotifier(null);
   // ValueNotifier<ContactStatus> contactStatusNotifier =
@@ -157,15 +159,15 @@ class ChatPageController {
   /// Ensure [mid] is in the list (insert from DB if needed), then ask UI to
   /// scroll + highlight it.
   Future<void> locateMid(int mid) async {
-    var index = tileDataList
-        .indexWhere((e) => e.chatMsgMNotifier.value.mid == mid);
+    var index =
+        tileDataList.indexWhere((e) => e.chatMsgMNotifier.value.mid == mid);
     if (index < 0) {
       final msg = await _chatMsgDao.getMsgByMid(mid);
       if (msg != null) {
         final tileData = await prepareTileData(msg);
         await insert(findInsertIndex(msg), tileData, scroll: false);
-        index = tileDataList
-            .indexWhere((e) => e.chatMsgMNotifier.value.mid == mid);
+        index =
+            tileDataList.indexWhere((e) => e.chatMsgMNotifier.value.mid == mid);
       }
     }
     if (index < 0) return;

@@ -1,9 +1,11 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:vocechat_client/services/e2e_pad.dart';
 import 'package:vocechat_client/services/e2e_v2_core.dart';
 import 'package:vocechat_client/services/e2e_v2_identity.dart';
+import 'package:vocechat_client/services/e2ee_v2_wire.dart';
+import 'package:uuid/uuid.dart';
 
 /// DM Double Ratchet encrypt/decrypt via FFI core (multi-device fan-out).
 class E2eV2Dm {
@@ -73,8 +75,7 @@ class E2eV2Dm {
     required Map<String, dynamic> local,
     required int recipientUid,
     required Map bundle,
-    required String plaintext,
-    String mime = 'text/plain',
+    required String plaintextB64,
   }) async {
     if (!peerSupportsV2(bundle)) return null;
     final deviceId = local['deviceId'] as String;
@@ -86,7 +87,6 @@ class E2eV2Dm {
     final identity = _parseIdentityPublic(bundle['identity_key_pub'] as String);
     if (identity == null) return null;
 
-    final paddedB64 = E2ePad.padMessageB64(mime, plaintext);
     final skKey = _sessionKey(myUid, deviceId, recipientUid, peerDevice);
     final existing = await _secure.read(key: skKey);
 
@@ -94,7 +94,7 @@ class E2eV2Dm {
     if (existing != null) {
       final r = core.call('ratchet_encrypt', {
         'state': jsonDecode(existing),
-        'plaintext_b64': paddedB64,
+        'plaintext_b64': plaintextB64,
       });
       result = Map<String, dynamic>.from(r['result'] as Map);
     } else {
@@ -112,7 +112,7 @@ class E2eV2Dm {
           'one_time_prekey_b64': otk is Map ? otk['public_key'] : null,
           'one_time_prekey_id': otk is Map ? otk['key_id'] : null,
         },
-        'plaintext_b64': paddedB64,
+        'plaintext_b64': plaintextB64,
       });
       result = Map<String, dynamic>.from(r['result'] as Map);
     }
@@ -135,7 +135,7 @@ class E2eV2Dm {
   }
 
   /// Encrypt for all [bundles] (peer devices + own other devices).
-  static Future<({String content, Map<String, dynamic> properties})?>
+  static Future<({String content, E2eV2RoutingProperties properties})?>
       encryptText({
     required int uid,
     required int peerUid,
@@ -143,9 +143,21 @@ class E2eV2Dm {
     Map? bundle,
     List<Map>? bundles,
     String mime = 'text/plain',
+    String? localId,
+    int? kind,
+    Uint8List? body,
   }) async {
     final local = await _loadLocal(uid);
     if (local == null) return null;
+    final core = local['core'] as E2eV2Core;
+    final eventKind = kind ?? (mime == 'text/markdown' ? 8 : 1);
+    final eventBody = body ?? Uint8List.fromList(utf8.encode(plaintext));
+    final encoded = core.call('mls_application_encode', {
+      'kind': eventKind,
+      'body_b64': base64Encode(eventBody),
+      'metadata': {'1': base64Encode(utf8.encode(mime))},
+    });
+    final plaintextB64 = encoded['result']['plaintext_b64'] as String;
 
     final list = <Map>[...(bundles ?? [])];
     if (bundle != null) list.add(bundle);
@@ -171,8 +183,7 @@ class E2eV2Dm {
         local: local,
         recipientUid: recipientUid,
         bundle: b,
-        plaintext: plaintext,
-        mime: mime,
+        plaintextB64: plaintextB64,
       );
       if (copy != null) fanout.add(copy);
     }
@@ -181,8 +192,15 @@ class E2eV2Dm {
     }
 
     final deviceId = local['deviceId'] as String;
-    final localId = DateTime.now().millisecondsSinceEpoch;
-    await _secure.write(key: _plainKey(deviceId, localId), value: plaintext);
+    final messageLocalId = localId ?? const Uuid().v4();
+    await _secure.write(
+      key: _plainKey(deviceId, messageLocalId),
+      value: jsonEncode({
+        'kind': eventKind,
+        'body_b64': base64Encode(eventBody),
+        'metadata': {'1': base64Encode(utf8.encode(mime))},
+      }),
+    );
 
     final primary = fanout.firstWhere(
       (c) => (c['uid'] as num?)?.toInt() == peerUid,
@@ -207,10 +225,10 @@ class E2eV2Dm {
     final packed = base64Encode(utf8.encode(jsonEncode(envelope)));
     return (
       content: packed,
-      properties: E2ePad.minimalProps(
-        e2eVer: 2,
+      properties: E2eV2RoutingProperties.dr(
         senderDeviceId: deviceId,
-        localId: localId,
+        recipientDeviceId: primary['device_id'] as String,
+        localId: messageLocalId,
       ),
     );
   }
@@ -235,8 +253,10 @@ class E2eV2Dm {
     return null;
   }
 
-  static Future<String?> decryptText({
+  static Future<({int kind, Uint8List body, Map<int, Uint8List> metadata})?>
+      decryptApplication({
     required int uid,
+
     /// Message sender uid (from_uid) — remote party for the DR session.
     required int peerUid,
     required String content,
@@ -263,7 +283,9 @@ class E2eV2Dm {
 
     if (senderDevice == deviceId) {
       if (localId == null) return null;
-      return _secure.read(key: _plainKey(deviceId, localId));
+      final cached = await _secure.read(key: _plainKey(deviceId, localId));
+      if (cached == null) return null;
+      return _decodeCachedApplication(jsonDecode(cached) as Map);
     }
 
     final copy = _pickCopy(env, deviceId);
@@ -283,7 +305,7 @@ class E2eV2Dm {
         });
         final result = Map<String, dynamic>.from(r['result'] as Map);
         await _secure.write(key: skKey, value: jsonEncode(result['state']));
-        return _decodeDrPlaintext(result);
+        return _decodeDrPlaintext(core, result);
       }
 
       if (existing == null) return null;
@@ -295,16 +317,48 @@ class E2eV2Dm {
       });
       final result = Map<String, dynamic>.from(r['result'] as Map);
       await _secure.write(key: skKey, value: jsonEncode(result['state']));
-      return _decodeDrPlaintext(result);
+      return _decodeDrPlaintext(core, result);
     } catch (_) {
       return null;
     }
   }
 
-  static String? _decodeDrPlaintext(Map result) {
+  static ({int kind, Uint8List body, Map<int, Uint8List> metadata})?
+      _decodeDrPlaintext(E2eV2Core core, Map result) {
     final b64 = result['plaintext_b64'] as String?;
-    if (b64 != null) return E2ePad.unpadMessageB64(b64).text;
-    return result['plaintext'] as String?;
+    if (b64 == null) return null;
+    final decoded = core.call('mls_application_decode', {
+      'plaintext_b64': b64,
+    });
+    return _decodeCachedApplication(decoded['result'] as Map);
+  }
+
+  static ({int kind, Uint8List body, Map<int, Uint8List> metadata})
+      _decodeCachedApplication(Map value) => (
+            kind: (value['kind'] as num).toInt(),
+            body: base64Decode(value['body_b64'] as String),
+            metadata: (value['metadata'] as Map? ?? {}).map(
+              (key, encoded) => MapEntry(
+                int.parse('$key'),
+                base64Decode('$encoded'),
+              ),
+            ),
+          );
+
+  static Future<String?> decryptText({
+    required int uid,
+    required int peerUid,
+    required String content,
+    Object? localId,
+  }) async {
+    final event = await decryptApplication(
+      uid: uid,
+      peerUid: peerUid,
+      content: content,
+      localId: localId,
+    );
+    if (event == null || (event.kind != 1 && event.kind != 8)) return null;
+    return utf8.decode(event.body);
   }
 
   static bool isV2DrEnvelope(String content) {

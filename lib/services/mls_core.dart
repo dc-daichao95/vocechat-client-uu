@@ -16,6 +16,7 @@ abstract class MlsEngine {
   Future<Map<String, dynamic>> addMembers(
       {required String groupState, required List<String> keyPackages});
   Future<Map<String, dynamic>> memberIdentities(String groupState);
+  Future<Map<String, dynamic>> groupInfo(String groupState);
   Future<Map<String, dynamic>> removeMembers(
       {required String groupState, required List<String> identities});
   Future<Map<String, dynamic>> joinGroup(
@@ -79,6 +80,11 @@ class MlsCore implements MlsEngine {
   @override
   Future<Map<String, dynamic>> memberIdentities(String groupState) {
     return _invoke('mls_group_members', {'group_state_b64': groupState});
+  }
+
+  @override
+  Future<Map<String, dynamic>> groupInfo(String groupState) {
+    return _invoke('mls_group_info', {'group_state_b64': groupState});
   }
 
   @override

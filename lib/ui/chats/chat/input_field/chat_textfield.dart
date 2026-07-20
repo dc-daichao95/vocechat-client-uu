@@ -149,227 +149,228 @@ class _ChatTextFieldState extends State<ChatTextField> {
                   return KeyEventResult.ignored;
                 },
                 child: AppMentions(
-                defaultText: info.draft,
-                key: widget.mentionsKey,
-                enableMention: widget.groupInfoMNotifier != null,
-                hasText: hasText,
-                uid: widget.userInfoMNotifier?.value.uid,
-                gid: widget.groupInfoMNotifier?.value.gid,
-                // selectionControls: controls,
-                voiceButtonState: voiceButtonState,
-                inputFieldType: inputType,
-                contextMenuBuilder: _buildContextMenu,
-                leading: [
-                  ValueListenableBuilder<VoiceButtonType>(
-                      valueListenable: voiceButtonState,
-                      builder: (context, voiceButtonState, _) {
-                        switch (voiceButtonState) {
-                          case VoiceButtonType.recording:
-                            return SizedBox(
-                              width: widget._height * 2,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  Container(
-                                      width: widget._height,
-                                      height: widget._height,
-                                      margin: const EdgeInsets.only(right: 4),
-                                      child: Icon(Icons.delete,
-                                          color: AppColors.grey800)),
-                                ],
-                              ),
-                            );
-                          case VoiceButtonType.cancelling:
-                            return SizedBox(
-                              width: widget._height * 2,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  Container(
-                                      width: widget._height,
-                                      height: widget._height,
-                                      margin: const EdgeInsets.only(right: 4),
-                                      decoration: BoxDecoration(
-                                          color: Colors.red,
-                                          borderRadius: BorderRadius.circular(
-                                              widget._height / 2)),
-                                      child: const Icon(Icons.delete,
-                                          color: Colors.white)),
-                                ],
-                              ),
-                            );
+                  defaultText: info.draft,
+                  key: widget.mentionsKey,
+                  enableMention: widget.groupInfoMNotifier != null,
+                  hasText: hasText,
+                  uid: widget.userInfoMNotifier?.value.uid,
+                  gid: widget.groupInfoMNotifier?.value.gid,
+                  // selectionControls: controls,
+                  voiceButtonState: voiceButtonState,
+                  inputFieldType: inputType,
+                  contextMenuBuilder: _buildContextMenu,
+                  leading: [
+                    ValueListenableBuilder<VoiceButtonType>(
+                        valueListenable: voiceButtonState,
+                        builder: (context, voiceButtonState, _) {
+                          switch (voiceButtonState) {
+                            case VoiceButtonType.recording:
+                              return SizedBox(
+                                width: widget._height * 2,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    Container(
+                                        width: widget._height,
+                                        height: widget._height,
+                                        margin: const EdgeInsets.only(right: 4),
+                                        child: Icon(Icons.delete,
+                                            color: AppColors.grey800)),
+                                  ],
+                                ),
+                              );
+                            case VoiceButtonType.cancelling:
+                              return SizedBox(
+                                width: widget._height * 2,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    Container(
+                                        width: widget._height,
+                                        height: widget._height,
+                                        margin: const EdgeInsets.only(right: 4),
+                                        decoration: BoxDecoration(
+                                            color: Colors.red,
+                                            borderRadius: BorderRadius.circular(
+                                                widget._height / 2)),
+                                        child: const Icon(Icons.delete,
+                                            color: Colors.white)),
+                                  ],
+                                ),
+                              );
 
+                            default:
+                              return Row(
+                                children: [
+                                  SizedBox(
+                                    width: widget._height,
+                                    height: widget._height,
+                                    child: CupertinoButton(
+                                        padding: EdgeInsets.zero,
+                                        onPressed: _sendImage,
+                                        child: Icon(Icons.image,
+                                            color: AppColors.grey800)),
+                                  ),
+                                  SizedBox(
+                                    width: widget._height,
+                                    height: widget._height,
+                                    child: CupertinoButton(
+                                        padding: EdgeInsets.zero,
+                                        onPressed: _sendFile,
+                                        child: Icon(Icons.folder,
+                                            color: AppColors.grey800)),
+                                  ),
+                                  SizedBox(
+                                    width: widget._height,
+                                    height: widget._height,
+                                    child: CupertinoButton(
+                                        padding: EdgeInsets.zero,
+                                        onPressed: _pickEmoji,
+                                        child: Icon(
+                                            Icons.emoji_emotions_outlined,
+                                            color: AppColors.grey800)),
+                                  ),
+                                ],
+                              );
+                          }
+                        }),
+                  ],
+                  trailing: [
+                    ValueListenableBuilder<InputType>(
+                      valueListenable: inputType,
+                      builder: (context, inputType, child) {
+                        switch (inputType) {
+                          case InputType.text:
+                            return ValueListenableBuilder<bool>(
+                                valueListenable: hasText,
+                                builder: (context, hasText, child) {
+                                  if (hasText) {
+                                    return _buildSendButton();
+                                  } else {
+                                    return CupertinoButton(
+                                        padding: EdgeInsets.zero,
+                                        onPressed: _micIconPressed,
+                                        child: Icon(Icons.mic,
+                                            color: AppColors.grey800));
+                                  }
+                                });
+
+                          case InputType.voice:
+                            return CupertinoButton(
+                                padding: EdgeInsets.zero,
+                                onPressed: _keyboardButtonPressed,
+                                child: Icon(Icons.keyboard,
+                                    color: AppColors.grey800));
                           default:
-                            return Row(
-                              children: [
-                                SizedBox(
-                                  width: widget._height,
-                                  height: widget._height,
-                                  child: CupertinoButton(
-                                      padding: EdgeInsets.zero,
-                                      onPressed: _sendImage,
-                                      child: Icon(Icons.image,
-                                          color: AppColors.grey800)),
-                                ),
-                                SizedBox(
-                                  width: widget._height,
-                                  height: widget._height,
-                                  child: CupertinoButton(
-                                      padding: EdgeInsets.zero,
-                                      onPressed: _sendFile,
-                                      child: Icon(Icons.folder,
-                                          color: AppColors.grey800)),
-                                ),
-                                SizedBox(
-                                  width: widget._height,
-                                  height: widget._height,
-                                  child: CupertinoButton(
-                                      padding: EdgeInsets.zero,
-                                      onPressed: _pickEmoji,
-                                      child: Icon(Icons.emoji_emotions_outlined,
-                                          color: AppColors.grey800)),
-                                ),
-                              ],
-                            );
+                            return const SizedBox.shrink();
                         }
-                      }),
-                ],
-                trailing: [
-                  ValueListenableBuilder<InputType>(
-                    valueListenable: inputType,
-                    builder: (context, inputType, child) {
-                      switch (inputType) {
-                        case InputType.text:
-                          return ValueListenableBuilder<bool>(
-                              valueListenable: hasText,
-                              builder: (context, hasText, child) {
-                                if (hasText) {
-                                  return _buildSendButton();
-                                } else {
-                                  return CupertinoButton(
-                                      padding: EdgeInsets.zero,
-                                      onPressed: _micIconPressed,
-                                      child: Icon(Icons.mic,
-                                          color: AppColors.grey800));
-                                }
-                              });
-
-                        case InputType.voice:
-                          return CupertinoButton(
-                              padding: EdgeInsets.zero,
-                              onPressed: _keyboardButtonPressed,
-                              child: Icon(Icons.keyboard,
-                                  color: AppColors.grey800));
-                        default:
-                          return const SizedBox.shrink();
-                      }
-                    },
-                  ),
-                ],
-                onChanged: (text) {},
-                enabled: true,
-                suggestionPosition: SuggestionPosition.top,
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.newline,
-                autocorrect: false,
-                maxLines: 5,
-                minLines: 1,
-                maxLength: 2048,
-                inputFormatters: [VoceTextInputFormatter(2048)],
-                maxLengthEnforcement:
-                    MaxLengthEnforcement.truncateAfterCompositionEnds,
-                decoration: InputDecoration(
-                    isDense: true,
-                    counterText: "",
-                    hintText: info.hintText,
-                    hintMaxLines: 1,
-                    hintStyle: TextStyle(
-                      overflow: TextOverflow.ellipsis,
-                      color: widget._hintColor,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
+                      },
                     ),
-                    contentPadding: const EdgeInsets.fromLTRB(15, 5, 20, 5),
-                    border: InputBorder.none),
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w400,
-                ),
-                focusNode: widget.focusNode,
-                onSubmitted: (value) {
-                  _sendTxt();
-                  widget.focusNode.requestFocus();
-                },
-                mentions: [
-                  Mention(
-                      trigger: '@',
-                      style: TextStyle(
-                        color: AppColors.primaryBlue,
+                  ],
+                  onChanged: (text) {},
+                  enabled: true,
+                  suggestionPosition: SuggestionPosition.top,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  autocorrect: false,
+                  maxLines: 5,
+                  minLines: 1,
+                  maxLength: 2048,
+                  inputFormatters: [VoceTextInputFormatter(2048)],
+                  maxLengthEnforcement:
+                      MaxLengthEnforcement.truncateAfterCompositionEnds,
+                  decoration: InputDecoration(
+                      isDense: true,
+                      counterText: "",
+                      hintText: info.hintText,
+                      hintMaxLines: 1,
+                      hintStyle: TextStyle(
+                        overflow: TextOverflow.ellipsis,
+                        color: widget._hintColor,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
                       ),
-                      data: memberList,
-                      matchAll: false,
-                      suggestionBuilder: (data) {
-                        return Container(
-                          color: AppColors.grey100,
-                          width: double.infinity,
-                          height: 60,
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: <Widget>[
-                              VoceAvatar(
-                                  size: VoceAvatarSize.s36,
-                                  isCircle: useCircleAvatar,
-                                  name: data['display'] ?? "",
-                                  avatarBytes: data["photo"],
-                                  backgroundColor: AppColors.primaryBlue,
-                                  fontColor: AppColors.grey200),
-                              const SizedBox(width: 16),
-                              Flexible(
-                                child: Text(data['display'],
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        fontSize: 16, color: Colors.black)),
-                              ),
-                              if (data['is_admin'] == true)
+                      contentPadding: const EdgeInsets.fromLTRB(15, 5, 20, 5),
+                      border: InputBorder.none),
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w400,
+                  ),
+                  focusNode: widget.focusNode,
+                  onSubmitted: (value) {
+                    _sendTxt();
+                    widget.focusNode.requestFocus();
+                  },
+                  mentions: [
+                    Mention(
+                        trigger: '@',
+                        style: TextStyle(
+                          color: AppColors.primaryBlue,
+                        ),
+                        data: memberList,
+                        matchAll: false,
+                        suggestionBuilder: (data) {
+                          return Container(
+                            color: AppColors.grey100,
+                            width: double.infinity,
+                            height: 60,
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: <Widget>[
+                                VoceAvatar(
+                                    size: VoceAvatarSize.s36,
+                                    isCircle: useCircleAvatar,
+                                    name: data['display'] ?? "",
+                                    avatarBytes: data["photo"],
+                                    backgroundColor: AppColors.primaryBlue,
+                                    fontColor: AppColors.grey200),
                                 const SizedBox(width: 16),
-                              if (data['is_admin'] == true)
-                                Container(
-                                  padding:
-                                      const EdgeInsets.fromLTRB(3, 2, 3, 2),
-                                  decoration: BoxDecoration(
-                                    color: Colors.green[300],
-                                    borderRadius: const BorderRadius.all(
-                                        Radius.circular(5.0)),
-                                  ),
-                                  child: const Text('Admin',
-                                      style: TextStyle(
-                                          color: Colors.white, fontSize: 14)),
+                                Flexible(
+                                  child: Text(data['display'],
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          fontSize: 16, color: Colors.black)),
                                 ),
-                              if (data['is_owner'] == true)
-                                const SizedBox(width: 16),
-                              if (data['is_owner'] == true)
-                                Container(
-                                  padding:
-                                      const EdgeInsets.fromLTRB(3, 2, 3, 2),
-                                  decoration: BoxDecoration(
-                                    color: Colors.green[300],
-                                    borderRadius: const BorderRadius.all(
-                                        Radius.circular(5.0)),
+                                if (data['is_admin'] == true)
+                                  const SizedBox(width: 16),
+                                if (data['is_admin'] == true)
+                                  Container(
+                                    padding:
+                                        const EdgeInsets.fromLTRB(3, 2, 3, 2),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green[300],
+                                      borderRadius: const BorderRadius.all(
+                                          Radius.circular(5.0)),
+                                    ),
+                                    child: const Text('Admin',
+                                        style: TextStyle(
+                                            color: Colors.white, fontSize: 14)),
                                   ),
-                                  child: const Text('Owner',
-                                      style: TextStyle(
-                                          color: Colors.white, fontSize: 14)),
-                                )
-                            ],
-                          ),
-                        );
-                      })
-                ],
-              ),
+                                if (data['is_owner'] == true)
+                                  const SizedBox(width: 16),
+                                if (data['is_owner'] == true)
+                                  Container(
+                                    padding:
+                                        const EdgeInsets.fromLTRB(3, 2, 3, 2),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green[300],
+                                      borderRadius: const BorderRadius.all(
+                                          Radius.circular(5.0)),
+                                    ),
+                                    child: const Text('Owner',
+                                        style: TextStyle(
+                                            color: Colors.white, fontSize: 14)),
+                                  )
+                              ],
+                            ),
+                          );
+                        })
+                  ],
+                ),
               );
             });
       },

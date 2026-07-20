@@ -132,8 +132,7 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
                   return ValueListenableBuilder<int?>(
                     valueListenable: hl,
                     builder: (context, highlightMid, _) {
-                      final mid =
-                          widget.tileData.chatMsgMNotifier.value.mid;
+                      final mid = widget.tileData.chatMsgMNotifier.value.mid;
                       return tileBody(highlighted: highlightMid == mid);
                     },
                   );
@@ -290,7 +289,7 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
   Widget _buildTitle(BuildContext context) {
     final msg = widget.tileData.chatMsgMNotifier.value;
     final contentType = msg.detailContentTypeStr;
-    bool wasE2e = contentType == typeE2e;
+    bool wasE2e = contentType == typeE2eV2;
     try {
       final props = json.decode(msg.detail)['properties'];
       if (props is Map && (props['e2e'] == true || props['e2e_ver'] != null)) {
@@ -452,9 +451,11 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
             return _wrapBubble(
                 E2eDecryptBubble(chatMsgM: chatMsgM, isSelf: isSelf));
           } else if (chatMsgM.isTextMsg) {
-            return _wrapBubble(VoceTextBubble(chatMsgM: chatMsgM, isSelf: isSelf));
+            return _wrapBubble(
+                VoceTextBubble(chatMsgM: chatMsgM, isSelf: isSelf));
           } else if (chatMsgM.isMarkdownMsg) {
-            return _wrapBubble(VoceMdBubble(chatMsgM: chatMsgM, isSelf: isSelf));
+            return _wrapBubble(
+                VoceMdBubble(chatMsgM: chatMsgM, isSelf: isSelf));
           } else if (chatMsgM.isFileMsg) {
             if (chatMsgM.isImageMsg) {
               return VoceTileImageBubble.tileData(
@@ -490,10 +491,10 @@ class _VoceMsgTileState extends State<VoceMsgTile> {
             return VoceArchiveBubble.tileData(
                 key: ObjectKey(widget.tileData), tileData: widget.tileData);
           }
-          return _wrapBubble(
-              Text(AppLocalizations.of(context)!.unsupportedMessageType,
-                  style: TextStyle(
-                      color: isSelf ? Colors.white : AppColors.coolGrey700)));
+          return _wrapBubble(Text(
+              AppLocalizations.of(context)!.unsupportedMessageType,
+              style: TextStyle(
+                  color: isSelf ? Colors.white : AppColors.coolGrey700)));
         });
   }
 

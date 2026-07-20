@@ -46,7 +46,7 @@ const typeMarkdown = "text/markdown";
 const typeFile = "vocechat/file";
 const typeArchive = "vocechat/archive";
 const typeAudio = "vocechat/audio";
-const typeE2e = "vocechat/e2e";
+const typeE2eV2 = "application/vnd.vocechat.e2ee.v2";
 
 /// Email RegEx from https://www.w3.org/TR/2012/WD-html-markup-20120329/input.email.html
 // const emailRegEx =

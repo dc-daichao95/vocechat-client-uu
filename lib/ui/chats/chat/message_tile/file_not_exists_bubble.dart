@@ -1,11 +1,9 @@
 // import 'package:flutter/material.dart';
 
 // class FileNotExistsBubble extends StatelessWidget {
-//   const FileNotExistsBubble({Key? key, 
+//   const FileNotExistsBubble({Key? key,
 
 //   }) : super(key: key);
-
-  
 
 //   @override
 //   Widget build(BuildContext context) {

@@ -18,6 +18,7 @@ class GroupInfo {
   bool? onlyOwnerCanSendMsg;
   bool? showEmail;
   String? extSettings;
+
   /// When null/absent, clients treat E2E as enabled (server default-on).
   bool? e2eEnabled;
 

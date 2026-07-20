@@ -1,12 +1,8 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
 import 'package:vocechat_client/dao/init_dao/group_info.dart';
 import 'package:vocechat_client/dao/init_dao/user_info.dart';
-import 'package:vocechat_client/services/e2e_crypto.dart';
 import 'package:vocechat_client/ui/app_colors.dart';
 import 'package:vocechat_client/ui/widgets/avatar/voce_avatar_size.dart';
 import 'package:vocechat_client/ui/widgets/avatar/voce_user_avatar.dart';
@@ -41,31 +37,10 @@ class _SearchHitView {
   });
 }
 
-/// Decrypt E2E envelope (if any) and resolve "频道 · name" / "私信 · name".
+/// Resolve "频道 · name" / "私信 · name". Only already locally decrypted
+/// generation-2 messages are searchable.
 Future<_SearchHitView> prepareSearchHit(ChatMsgM raw) async {
-  var msg = raw;
-  if (msg.isE2ePendingMsg) {
-    try {
-      final uid = App.app.userDb?.uid;
-      if (uid != null) {
-        final detail = Map<String, dynamic>.from(json.decode(msg.detail));
-        final ok = await E2eCrypto.rewriteDetailInPlace(uid: uid, detail: detail)
-            .timeout(const Duration(seconds: 4), onTimeout: () => false);
-        if (ok) {
-          final map = Map<String, dynamic>.from(msg.values);
-          map[ChatMsgM.F_detail] = json.encode(detail);
-          msg = ChatMsgM.fromMap(map);
-          // Persist so jump-to-chat / later searches see plaintext.
-          try {
-            await ChatMsgDao().addOrUpdate(msg);
-          } catch (_) {}
-        }
-      }
-    } catch (e) {
-      App.logger.warning('search decrypt mid=${raw.mid}: $e');
-    }
-  }
-
+  final msg = raw;
   final label = await conversationLabelFor(msg);
   UserInfoM? sender;
   try {

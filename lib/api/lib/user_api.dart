@@ -13,6 +13,7 @@ import 'package:vocechat_client/api/models/user/user_info.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/app_consts.dart';
 import 'package:vocechat_client/dao/init_dao/contacts.dart';
+import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 import 'package:vocechat_client/ui/contact/contacts_add_segmented_control.dart';
 
 class UserApi {
@@ -88,38 +89,35 @@ class UserApi {
     return newRes;
   }
 
-  Future<Response<int>> sendE2eMsg(
-      int uid, String content, Map<String, dynamic> properties) async {
+  Future<Response<int>> sendE2eV2Msg(
+    int uid,
+    String ciphertextBase64,
+    E2eV2RoutingProperties properties,
+  ) async {
     final dio = DioUtil.token(baseUrl: _baseUrl);
-    dio.options.headers["x-properties"] =
-        base64.encode(utf8.encode(json.encode(properties)));
-    dio.options.headers["content-type"] = typeE2e;
-
-    Map<String, dynamic> refererHeader = {
-      'referer': App.app.chatServerM.fullUrl
-    };
-    if (App.app.chatServerM.url == "dev.voce.chat") {
-      refererHeader = {'referer': "https://privoce.voce.chat"};
+    final headers = Map<String, dynamic>.from(dio.options.headers)
+      ..['x-properties'] = encodeE2eV2Properties(properties)
+      ..['content-type'] = typeE2eV2;
+    if (App.app.chatServerM.url == 'dev.voce.chat') {
+      headers['referer'] = 'https://privoce.voce.chat';
+    } else {
+      headers['referer'] = App.app.chatServerM.fullUrl;
     }
-    dio.options.headers.addAll(refererHeader);
 
     final res = await dio.post(
-      "/$uid/send",
-      data: content,
-      options: Options(
-          contentType: typeE2e,
-          headers: Map<String, dynamic>.from(dio.options.headers)),
+      '/$uid/send',
+      data: ciphertextBase64,
+      options: Options(contentType: typeE2eV2, headers: headers),
     );
-
-    var newRes = Response<int>(
-        headers: res.headers,
-        requestOptions: res.requestOptions,
-        isRedirect: res.isRedirect,
-        statusCode: res.statusCode,
-        statusMessage: res.statusMessage,
-        redirects: res.redirects,
-        extra: res.extra);
-
+    final newRes = Response<int>(
+      headers: res.headers,
+      requestOptions: res.requestOptions,
+      isRedirect: res.isRedirect,
+      statusCode: res.statusCode,
+      statusMessage: res.statusMessage,
+      redirects: res.redirects,
+      extra: res.extra,
+    );
     if (res.statusCode == 200 && res.data != null) {
       newRes.data = res.data! as int;
     }
@@ -305,9 +303,13 @@ class UserApi {
 
   /// Global time-window search across the current user's messages.
   Future<Response> searchMessagesByTime(
-      {required int afterTs, required int beforeTs, String? q, int limit = 100}) async {
+      {required int afterTs,
+      required int beforeTs,
+      String? q,
+      int limit = 100}) async {
     final dio = DioUtil.token(baseUrl: _baseUrl);
-    var url = "/messages/by_time?after_ts=$afterTs&before_ts=$beforeTs&limit=$limit";
+    var url =
+        "/messages/by_time?after_ts=$afterTs&before_ts=$beforeTs&limit=$limit";
     if (q != null && q.trim().isNotEmpty) {
       url += "&q=${Uri.encodeQueryComponent(q.trim())}";
     }

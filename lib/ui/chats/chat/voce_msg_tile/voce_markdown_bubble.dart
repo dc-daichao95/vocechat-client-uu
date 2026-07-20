@@ -33,7 +33,8 @@ class VoceMdBubble extends StatelessWidget {
             a: TextStyle(
                 fontWeight: FontWeight.w400,
                 fontSize: 14,
-                color: isSelf ? const Color(0xFFA7F3D0) : AppColors.coolGrey700)),
+                color:
+                    isSelf ? const Color(0xFFA7F3D0) : AppColors.coolGrey700)),
         onTapLink: (text, url, title) {
           if (url != null) {
             SharedFuncs.appLaunchUrl(Uri.parse(url));

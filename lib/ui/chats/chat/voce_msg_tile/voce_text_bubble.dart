@@ -43,8 +43,8 @@ class VoceTextBubble extends StatelessWidget {
     }
 
     final baseColor = isSelf ? Colors.white : AppColors.coolGrey700;
-    _normalStyle = TextStyle(
-        fontSize: 16, color: baseColor, fontWeight: FontWeight.w400);
+    _normalStyle =
+        TextStyle(fontSize: 16, color: baseColor, fontWeight: FontWeight.w400);
     _mentionStyle = TextStyle(
         fontSize: 16,
         color: isSelf ? const Color(0xFFA7F3D0) : AppColors.cyan500,
@@ -54,8 +54,7 @@ class VoceTextBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     var children = <InlineSpan>[];
-    final linkColor =
-        isSelf ? const Color(0xFFA7F3D0) : AppColors.primaryBlue;
+    final linkColor = isSelf ? const Color(0xFFA7F3D0) : AppColors.primaryBlue;
 
     _content.splitMapJoin(
       RegExp(urlRegEx, caseSensitive: false, dotAll: true),

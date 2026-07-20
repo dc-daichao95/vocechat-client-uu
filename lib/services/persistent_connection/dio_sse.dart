@@ -130,7 +130,8 @@ class VoceDioSse extends PersistentConnection {
       );
 
       if (gen != _generation) {
-        App.logger.info('Dio SSE stale response gen=$gen (current=$_generation)');
+        App.logger
+            .info('Dio SSE stale response gen=$gen (current=$_generation)');
         isConnecting = false;
         return;
       }

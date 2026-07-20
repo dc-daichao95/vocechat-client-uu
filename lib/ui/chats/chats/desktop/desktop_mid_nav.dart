@@ -125,7 +125,8 @@ class DesktopMidNavState extends State<DesktopMidNav> {
     }
   }
 
-  void _updateUnreadTotals(List<ChatTileData> channels, List<ChatTileData> people) {
+  void _updateUnreadTotals(
+      List<ChatTileData> channels, List<ChatTileData> people) {
     int ch = 0;
     for (final t in channels) {
       if (!t.isMuted.value) ch += t.unreadCount.value;
@@ -166,8 +167,7 @@ class DesktopMidNavState extends State<DesktopMidNav> {
       if (t != null) peopleMap[d.dmUid] = t;
     }
     final peopleTiles0 = peopleMap.values.toList();
-    peopleTiles0
-        .sort((a, b) => b.updatedAt.value.compareTo(a.updatedAt.value));
+    peopleTiles0.sort((a, b) => b.updatedAt.value.compareTo(a.updatedAt.value));
 
     final savedList = await SavedDao().list();
     final recent = await ChatMsgDao().list(orderBy: '${ChatMsgM.F_mid} DESC');
@@ -213,9 +213,9 @@ class DesktopMidNavState extends State<DesktopMidNav> {
   }
 
   Future<void> _addChannel() async {
-    final group = await Navigator.of(context, rootNavigator: true)
-        .push<GroupInfoM?>(MaterialPageRoute(
-            builder: (_) => NewChannelPage(enablePublic: true)));
+    final group = await Navigator.of(context, rootNavigator: true).push<
+            GroupInfoM?>(
+        MaterialPageRoute(builder: (_) => NewChannelPage(enablePublic: true)));
     if (!mounted) return;
     if (group != null) {
       widget.onOpenChannel(group);
@@ -225,12 +225,11 @@ class DesktopMidNavState extends State<DesktopMidNav> {
 
   Future<void> _addFriend() async {
     final user = await Navigator.of(context, rootNavigator: true)
-        .push<UserInfoM?>(
-            MaterialPageRoute(builder: (_) => const NewDmPage()));
+        .push<UserInfoM?>(MaterialPageRoute(builder: (_) => const NewDmPage()));
     if (!mounted) return;
     if (user != null) {
-      await DmInfoDao().addOrUpdate(DmInfoM.item(
-          user.uid, '', DateTime.now().millisecondsSinceEpoch));
+      await DmInfoDao().addOrUpdate(
+          DmInfoM.item(user.uid, '', DateTime.now().millisecondsSinceEpoch));
       widget.onOpenDm(user.uid);
     }
     await reload(showSpinner: false);
@@ -288,9 +287,8 @@ class DesktopMidNavState extends State<DesktopMidNav> {
                         alignment: Alignment.center,
                         child: Icon(icon,
                             size: 22,
-                            color: on
-                                ? AppColors.primaryBlue
-                                : AppColors.grey500),
+                            color:
+                                on ? AppColors.primaryBlue : AppColors.grey500),
                       ),
                       if (unread > 0)
                         Positioned(
@@ -306,8 +304,7 @@ class DesktopMidNavState extends State<DesktopMidNav> {
                     style: TextStyle(
                         fontSize: 11,
                         fontWeight: on ? FontWeight.w600 : FontWeight.w400,
-                        color:
-                            on ? AppColors.primaryBlue : AppColors.grey500)),
+                        color: on ? AppColors.primaryBlue : AppColors.grey500)),
               ],
             ),
           ),
@@ -338,8 +335,8 @@ class DesktopMidNavState extends State<DesktopMidNav> {
     if (_logoBytes.isNotEmpty) {
       avatar = ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.memory(_logoBytes,
-            width: 32, height: 32, fit: BoxFit.cover),
+        child:
+            Image.memory(_logoBytes, width: 32, height: 32, fit: BoxFit.cover),
       );
     } else {
       final ch = _serverName.isNotEmpty ? _serverName[0].toUpperCase() : 'V';
@@ -457,8 +454,7 @@ class DesktopMidNavState extends State<DesktopMidNav> {
           separatorBuilder: (_, __) => const Divider(height: 1),
           itemBuilder: (context, i) {
             final m = files[i];
-            final name =
-                m.msgNormal?.properties?['name']?.toString() ?? 'file';
+            final name = m.msgNormal?.properties?['name']?.toString() ?? 'file';
             final size = m.msgNormal?.properties?['size'];
             return ListTile(
               tileColor: i.isEven ? Colors.white : AppColors.grey100,

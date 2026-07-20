@@ -141,7 +141,7 @@ class VoceContextMenu extends StatefulWidget {
       'Use CupertinoContextMenu.builder instead. '
       'This feature was deprecated after v3.4.0-34.1.pre.',
     )
-        this.previewBuilder = _defaultPreviewBuilder,
+    this.previewBuilder = _defaultPreviewBuilder,
   })  : assert(actions.isNotEmpty),
         builder =
             ((BuildContext context, Animation<double> animation) => child),

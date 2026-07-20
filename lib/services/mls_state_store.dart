@@ -27,6 +27,8 @@ class MlsStateStore {
   }
 
   String _cursorKey(String route) => '${_groupKey(route)}:cursor';
+  String _generationKey(String route, int epoch) =>
+      '${_groupKey(route)}:send-generation:$epoch';
 
   Future<String?> readDeviceState() => _secure.read(_deviceKey);
 
@@ -50,6 +52,14 @@ class MlsStateStore {
   Future<void> writeCursor(String route, int cursor) {
     if (cursor < 0) throw ArgumentError.value(cursor, 'cursor');
     return _secure.write(_cursorKey(route), '$cursor');
+  }
+
+  Future<int> nextSendGeneration(String route, int epoch) async {
+    if (epoch < 0) throw ArgumentError.value(epoch, 'epoch');
+    final key = _generationKey(route, epoch);
+    final generation = int.tryParse(await _secure.read(key) ?? '') ?? 0;
+    await _secure.write(key, '${generation + 1}');
+    return generation;
   }
 }
 

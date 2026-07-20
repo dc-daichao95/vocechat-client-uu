@@ -26,6 +26,7 @@ class MsgNotificationService {
       FlutterLocalNotificationsPlugin();
   bool _ready = false;
   bool _winLocalNotifier = false;
+
   /// Absolute path to a copied PNG used where OS toast can load a file icon.
   String? _iconFilePath;
 
@@ -44,9 +45,8 @@ class MsgNotificationService {
         await _androidPlugin.initialize(
           const InitializationSettings(android: android),
         );
-        final impl = _androidPlugin
-            .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin>();
+        final impl = _androidPlugin.resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>();
         await impl?.requestNotificationsPermission();
         const channel = AndroidNotificationChannel(
           'vocechat_messages',
@@ -79,7 +79,8 @@ class MsgNotificationService {
     try {
       final bytes = await rootBundle.load(_assetIcon);
       final dir = await getApplicationSupportDirectory();
-      final file = File('${dir.path}${Platform.pathSeparator}vocechat_notif_icon.png');
+      final file =
+          File('${dir.path}${Platform.pathSeparator}vocechat_notif_icon.png');
       await file.writeAsBytes(
           bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
           flush: true);
@@ -99,9 +100,7 @@ class MsgNotificationService {
     // Only suppress when user is actively viewing that chat in the foreground.
     // Windows minimize often keeps "resumed" briefly — inactive sets
     // appInForeground=false so toasts / taskbar flash still fire.
-    if (appInForeground &&
-        chatId != null &&
-        chatId == focusedChatId) {
+    if (appInForeground && chatId != null && chatId == focusedChatId) {
       return;
     }
 
@@ -198,8 +197,7 @@ class MsgNotificationService {
             borderRadius: BorderRadius.circular(10),
             color: const Color(0xFF1F2937),
             child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -298,7 +296,7 @@ class MsgNotificationService {
       try {
         final map = json.decode(msg.detail) as Map;
         final ct = map['content_type'] as String?;
-        if (ct == typeE2e) return '[Encrypted message]';
+        if (ct == typeE2eV2) return '[Encrypted message]';
       } catch (_) {}
       if (msg.isFileMsg) {
         final name = msg.msgNormal?.properties?['name']?.toString();

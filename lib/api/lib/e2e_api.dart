@@ -55,26 +55,12 @@ class E2eApi {
     return _client().get('/identity/$uid');
   }
 
-  Future<Response> deviceLinkStart() {
-    return _client().post('/device-link/start');
-  }
+  Future<Response> putBackup(String blobBase64) => _client().put(
+        '/backup',
+        data: {'version': 2, 'blob_base64': blobBase64},
+      );
 
-  Future<Response> deviceLinkPutPackage({
-    required int linkId,
-    required String packageBase64,
-  }) {
-    return _client().put('/device-link/$linkId/package', data: {
-      'package_base64': packageBase64,
-    });
-  }
+  Future<Response> getBackup() => _client().get('/backup');
 
-  Future<Response> deviceLinkComplete(String token) {
-    return _client().post('/device-link/complete', data: {
-      'token': token,
-    });
-  }
-
-  Future<Response> deviceLinkStatus(int linkId) {
-    return _client().get('/device-link/$linkId');
-  }
+  Future<Response> deleteBackup() => _client().delete('/backup');
 }

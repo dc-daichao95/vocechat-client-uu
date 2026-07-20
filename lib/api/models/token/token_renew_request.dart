@@ -9,7 +9,8 @@ class TokenRenewRequest {
 
   TokenRenewRequest(this.token, this.refreshToken);
 
-  factory TokenRenewRequest.fromJson(Map<String, dynamic> json) => _$TokenRenewRequestFromJson(json);
+  factory TokenRenewRequest.fromJson(Map<String, dynamic> json) =>
+      _$TokenRenewRequestFromJson(json);
 
   Map<String, dynamic> toJson() => _$TokenRenewRequestToJson(this);
 }

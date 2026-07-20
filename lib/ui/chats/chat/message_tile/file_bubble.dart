@@ -22,7 +22,8 @@ class FileBubble extends StatelessWidget {
   final ChatMsgM? chatMsgM;
 
   const FileBubble(
-      {super.key, required this.filePath,
+      {super.key,
+      required this.filePath,
       required this.name,
       required this.size,
       required this.getLocalFile,

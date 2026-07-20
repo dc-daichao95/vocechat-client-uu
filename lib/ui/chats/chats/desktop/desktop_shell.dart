@@ -18,7 +18,8 @@ import 'package:vocechat_client/ui/settings/settings_page.dart';
 class DesktopShell extends StatefulWidget {
   final ValueNotifier<bool> disableGesture;
 
-  const DesktopShell({Key? key, required this.disableGesture}) : super(key: key);
+  const DesktopShell({Key? key, required this.disableGesture})
+      : super(key: key);
 
   @override
   State<DesktopShell> createState() => _DesktopShellState();
@@ -183,8 +184,8 @@ class _DesktopShellState extends State<DesktopShell> {
     }
 
     if (msg.dmUid > 0) {
-      await DmInfoDao().addOrUpdate(DmInfoM.item(
-          msg.dmUid, '', DateTime.now().millisecondsSinceEpoch));
+      await DmInfoDao().addOrUpdate(
+          DmInfoM.item(msg.dmUid, '', DateTime.now().millisecondsSinceEpoch));
       await _openDmUid(msg.dmUid, highlightMid: msg.mid);
       return;
     }

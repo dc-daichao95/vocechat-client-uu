@@ -14,8 +14,10 @@ class MessageTimeSearchSheet extends StatefulWidget {
   final int? dmUid;
   final void Function(List<ChatMsgM> msgs, {int? scrollToMid})? onResults;
   final void Function(ChatMsgM msg)? onJumpToMsg;
+
   /// When true (mid-nav panel), do not Navigator.pop after search.
   final bool embedded;
+
   /// When true and not [embedded], show results list inside this sheet.
   final bool showInlineResults;
 
@@ -84,7 +86,8 @@ class _MessageTimeSearchSheetState extends State<MessageTimeSearchSheet> {
     try {
       final ts = _jumpAt.millisecondsSinceEpoch;
       final res = _isChannel
-          ? await GroupApi().getHistory(widget.gid!, null, limit: 80, beforeTs: ts)
+          ? await GroupApi()
+              .getHistory(widget.gid!, null, limit: 80, beforeTs: ts)
           : await UserApi()
               .getHistory(widget.dmUid!, null, limit: 80, beforeTs: ts);
       await _handleHistoryRes(res);
@@ -178,8 +181,8 @@ class _MessageTimeSearchSheetState extends State<MessageTimeSearchSheet> {
       try {
         final map = Map<String, dynamic>.from(item as Map);
         final chatMsg = ChatMsg.fromJson(map);
-        final m =
-            ChatMsgM.fromMsg(chatMsg, chatMsg.mid.toString(), MsgStatus.success);
+        final m = ChatMsgM.fromMsg(
+            chatMsg, chatMsg.mid.toString(), MsgStatus.success);
         msgs.add(m);
         scrollMid = m.mid;
       } catch (e) {
@@ -198,7 +201,8 @@ class _MessageTimeSearchSheetState extends State<MessageTimeSearchSheet> {
     showMessageSearchDetailDialog(
       context,
       msg: msg,
-      onJump: widget.onJumpToMsg == null ? null : () => widget.onJumpToMsg!(msg),
+      onJump:
+          widget.onJumpToMsg == null ? null : () => widget.onJumpToMsg!(msg),
     );
   }
 
@@ -277,9 +281,7 @@ class _MessageTimeSearchSheetState extends State<MessageTimeSearchSheet> {
           const SizedBox(height: 8),
           ElevatedButton(
             onPressed: _loading ? null : (_tab == 1 ? _runRange : _runGlobal),
-            child: Text(_loading
-                ? '加载中…'
-                : (_tab == 1 ? '查询时间段' : '全局搜索')),
+            child: Text(_loading ? '加载中…' : (_tab == 1 ? '查询时间段' : '全局搜索')),
           ),
         ],
         if (_status != null) ...[

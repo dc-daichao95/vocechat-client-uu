@@ -12,6 +12,7 @@ import 'package:vocechat_client/ui/app_alert_dialog.dart';
 import 'package:vocechat_client/ui/app_colors.dart';
 import 'package:vocechat_client/ui/app_text_styles.dart';
 import 'package:vocechat_client/ui/settings/child_pages/firebase_settings_page.dart';
+import 'package:vocechat_client/ui/settings/child_pages/e2e_backup_page.dart';
 import 'package:vocechat_client/ui/settings/child_pages/language_setting_page.dart';
 import 'package:vocechat_client/ui/settings/child_pages/server_info_settings_page.dart';
 import 'package:vocechat_client/ui/settings/child_pages/settings_about_page.dart';
@@ -69,6 +70,14 @@ class _SettingPageState extends State<SettingPage> {
                   _buildUserInfo(),
                   _buildServer(context),
                   _buildLanguage(context),
+                  BannerTile(
+                    title: 'E2EE account migration',
+                    keepTrailingArrow: true,
+                    enableTap: true,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const E2eBackupPage()),
+                    ),
+                  ),
                   _buildAbout(),
                   // if (App.app.userDb?.userInfo.isAdmin ?? false)
                   //   _buildConfigs(context),

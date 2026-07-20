@@ -44,12 +44,6 @@ class MlsApi {
         options: Options(responseType: ResponseType.bytes)));
   }
 
-  Future<Response<Uint8List>> append(
-      String route, String deviceId, Uint8List artifact) {
-    return _bytes(_client().post('/route/$route/$deviceId',
-        data: artifact, options: Options(responseType: ResponseType.bytes)));
-  }
-
   Future<Response<Uint8List>> claimInitialization(
       String route, String deviceId) {
     return _bytes(_client().post('/route/$route/$deviceId/claim',
@@ -58,37 +52,6 @@ class MlsApi {
 
   Future<Response> markInitialized(String route, String deviceId) {
     return _client().post('/route/$route/$deviceId/initialized');
-  }
-
-  Future<Response<Uint8List>> read(String route, {int after = 0}) {
-    return _bytes(
-      _client().get('/route/$route',
-          queryParameters: {'after': after},
-          options: Options(responseType: ResponseType.bytes)),
-    );
-  }
-
-  static List<MlsArtifact> decodeBatch(Uint8List bytes) {
-    final artifacts = <MlsArtifact>[];
-    var offset = 0;
-    while (offset < bytes.length) {
-      if (bytes.length - offset < 12) {
-        throw const FormatException('truncated MLS artifact header');
-      }
-      final data = ByteData.sublistView(bytes, offset, offset + 12);
-      final sequence = data.getUint64(0, Endian.big);
-      final length = data.getUint32(8, Endian.big);
-      offset += 12;
-      if (length > 2 * 1024 * 1024 || bytes.length - offset < length) {
-        throw const FormatException('invalid MLS artifact length');
-      }
-      artifacts.add(MlsArtifact(
-        sequence: sequence,
-        payload: Uint8List.sublistView(bytes, offset, offset + length),
-      ));
-      offset += length;
-    }
-    return artifacts;
   }
 
   Future<Response<Uint8List>> _bytes(Future<Response> request) async {
@@ -115,11 +78,4 @@ class MlsApi {
       extra: response.extra,
     );
   }
-}
-
-class MlsArtifact {
-  final int sequence;
-  final Uint8List payload;
-
-  const MlsArtifact({required this.sequence, required this.payload});
 }

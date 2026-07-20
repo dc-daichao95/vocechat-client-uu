@@ -19,8 +19,7 @@ class DesktopServerRail extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final name = App.app.userDb?.userInfo.name ?? '?';
-    final initial =
-        name.isNotEmpty ? name.substring(0, 1).toUpperCase() : '?';
+    final initial = name.isNotEmpty ? name.substring(0, 1).toUpperCase() : '?';
     return Container(
       width: 56,
       color: const Color(0xFF1F2937),
@@ -43,13 +42,12 @@ class DesktopServerRail extends StatelessWidget {
               padding: EdgeInsets.zero,
               onPressed: () {
                 Navigator.of(context).push(PageRouteBuilder(
-                  pageBuilder: (context, a, b) =>
-                      ServerPage(showClose: true),
+                  pageBuilder: (context, a, b) => ServerPage(showClose: true),
                   transitionsBuilder: (context, animation, secondary, child) {
                     return SlideTransition(
-                      position: Tween(
-                              begin: const Offset(0, 1), end: Offset.zero)
-                          .animate(animation),
+                      position:
+                          Tween(begin: const Offset(0, 1), end: Offset.zero)
+                              .animate(animation),
                       child: child,
                     );
                   },
@@ -78,8 +76,7 @@ class DesktopServerRail extends StatelessWidget {
           height: MediaQuery.of(ctx).size.height * 0.75,
           child: Material(
             color: Colors.white,
-            borderRadius:
-                const BorderRadius.vertical(top: Radius.circular(12)),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
             child: ChatsDrawer(
               disableGesture: disableGesture,
               afterDrawerPop: () => Navigator.of(ctx).pop(),

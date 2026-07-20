@@ -10,7 +10,8 @@ class TokenRenewResponse {
 
   TokenRenewResponse(this.token, this.refreshToken, this.expiredIn);
 
-  factory TokenRenewResponse.fromJson(Map<String, dynamic> json) => _$TokenRenewResponseFromJson(json);
+  factory TokenRenewResponse.fromJson(Map<String, dynamic> json) =>
+      _$TokenRenewResponseFromJson(json);
 
   Map<String, dynamic> toJson() => _$TokenRenewResponseToJson(this);
 }

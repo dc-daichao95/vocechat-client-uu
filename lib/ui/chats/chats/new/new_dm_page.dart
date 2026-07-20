@@ -28,7 +28,9 @@ class _NewDmPageState extends State<NewDmPage> {
 
   Future<List<UserInfoM>> _loadUsers() async {
     final list = await UserInfoDao().getUserList() ?? [];
-    return list.where((u) => !SharedFuncs.isSelf(u.uid)).toList(growable: false);
+    return list
+        .where((u) => !SharedFuncs.isSelf(u.uid))
+        .toList(growable: false);
   }
 
   @override

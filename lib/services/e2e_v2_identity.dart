@@ -1,22 +1,22 @@
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vocechat_client/api/lib/e2e_api.dart';
 import 'package:vocechat_client/app.dart';
+import 'package:vocechat_client/shared_funcs.dart';
 import 'package:vocechat_client/services/e2e_v2_core.dart';
 
 /// Publishes E2EE v2 identity (X25519 + Ed25519 + signed prekey) via Rust core.
 class E2eV2Identity {
-  static const _deviceKey = 'VOCECHAT_E2E_V2_DEVICE_ID';
   static final _secure = FlutterSecureStorage(wOptions: WindowsOptions());
 
-  static Future<String> deviceId() async {
-    final prefs = await SharedPreferences.getInstance();
-    var id = prefs.getString(_deviceKey);
-    if (id == null || id.isEmpty) {
-      id = 'flutter-win:${DateTime.now().millisecondsSinceEpoch}';
-      await prefs.setString(_deviceKey, id);
+  static Future<String> deviceId({
+    Future<String> Function()? resolveAuthenticatedDevice,
+  }) async {
+    final id =
+        await (resolveAuthenticatedDevice ?? SharedFuncs.prepareDeviceInfo)();
+    if (id.isEmpty) {
+      throw StateError('authenticated device id is empty');
     }
     return id;
   }
@@ -43,10 +43,12 @@ class E2eV2Identity {
         'secret_ed25519_b64': gen['secret_ed25519_b64'],
       };
       public = Map<String, dynamic>.from(gen['public'] as Map);
-      await _secure.write(key: storeKey, value: jsonEncode({
-        ...secret,
-        'public': public,
-      }));
+      await _secure.write(
+          key: storeKey,
+          value: jsonEncode({
+            ...secret,
+            'public': public,
+          }));
     } else {
       final map = jsonDecode(raw) as Map<String, dynamic>;
       secret = {

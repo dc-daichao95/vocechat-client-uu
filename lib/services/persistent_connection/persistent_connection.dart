@@ -72,8 +72,7 @@ abstract class PersistentConnection {
           await connect();
           return;
         }
-        App.logger.warning(
-            'SSE reconnect: token renew failed — will retry');
+        App.logger.warning('SSE reconnect: token renew failed — will retry');
       } catch (e) {
         App.logger.severe('SSE reconnect error: $e');
       }

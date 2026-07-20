@@ -5,8 +5,8 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
-import 'package:vocechat_client/api/lib/e2e_api.dart';
 import 'package:vocechat_client/api/lib/group_api.dart';
+import 'package:vocechat_client/api/lib/mls_api.dart';
 import 'package:vocechat_client/api/lib/resource_api.dart';
 import 'package:vocechat_client/api/lib/user_api.dart';
 import 'package:vocechat_client/api/models/admin/system/sys_common_info.dart';
@@ -37,8 +37,12 @@ import 'package:vocechat_client/main.dart';
 import 'package:vocechat_client/models/local_kits.dart';
 import 'package:vocechat_client/services/file_handler.dart';
 import 'package:vocechat_client/services/file_handler/audio_file_handler.dart';
-import 'package:vocechat_client/services/e2e_crypto.dart';
+import 'package:vocechat_client/services/e2e_v2_attachment.dart';
+import 'package:vocechat_client/services/e2e_v2_dm.dart';
 import 'package:vocechat_client/services/e2e_v2_identity.dart';
+import 'package:vocechat_client/services/e2ee_v2_wire.dart';
+import 'package:vocechat_client/services/mls_channel_service.dart';
+import 'package:vocechat_client/services/mls_state_store.dart';
 import 'package:vocechat_client/services/persistent_connection/dio_sse.dart';
 import 'package:vocechat_client/services/persistent_connection/persistent_connection.dart';
 import 'package:vocechat_client/services/persistent_connection/sse.dart';
@@ -412,8 +416,8 @@ class VoceChatService {
     for (MsgAware msgAware in _msgListeners) {
       try {
         // ignore: discarded_futures
-        Future.sync(() => msgAware(chatMsgM, afterReady,
-                snippetOnly: snippetOnly))
+        Future.sync(
+                () => msgAware(chatMsgM, afterReady, snippetOnly: snippetOnly))
             .catchError((e, st) {
           App.logger.severe('MsgAware failed: $e\n$st');
         });
@@ -425,8 +429,7 @@ class VoceChatService {
     if (snippetOnly != true &&
         (afterReady == true || _msgListeners.isNotEmpty)) {
       // ignore: unawaited_futures
-      MsgNotificationService.instance
-          .onInboundMsg(chatMsgM, afterReady: true);
+      MsgNotificationService.instance.onInboundMsg(chatMsgM, afterReady: true);
     }
   }
 
@@ -660,10 +663,11 @@ class VoceChatService {
         if (chatMsg.mid < 0) {
           continue;
         }
+        if (!await _rewriteMlsV2Record(chatMsg)) continue;
 
         String localMid;
         if (chatMsg.fromUid == App.app.userDb!.uid) {
-          localMid = chatMsg.detail['properties']['cid'] ?? uuid();
+          localMid = _localMidFromProps(chatMsg.detail['properties']);
         } else {
           localMid = uuid();
         }
@@ -671,7 +675,11 @@ class VoceChatService {
         switch (chatMsg.detail["type"]) {
           case chatMsgNormal:
             // Persist envelopes quickly; decrypt in background after batch insert.
-            if (chatMsg.detail['content_type'] == typeE2e) {
+            final historyProps = chatMsg.detail['properties'];
+            final isDrV2 = chatMsg.detail['content_type'] == typeE2eV2 &&
+                historyProps is Map &&
+                historyProps['protocol'] == 'dr';
+            if (isDrV2) {
               final detail = chatMsg.detail;
               final content = detail['content'] as String? ?? '';
               final props = Map<String, dynamic>.from(
@@ -688,17 +696,6 @@ class VoceChatService {
 
             break;
           case chatMsgReply:
-            if (chatMsg.detail['content_type'] == typeE2e) {
-              final detail = chatMsg.detail;
-              final content = detail['content'] as String? ?? '';
-              final props = Map<String, dynamic>.from(
-                  (detail['properties'] as Map?)?.cast<String, dynamic>() ??
-                      {});
-              props['e2e'] = true;
-              props['e2e_envelope'] = content;
-              props['e2e_decrypt_failed'] = true;
-              detail['properties'] = props;
-            }
             ChatMsgM chatMsgM =
                 ChatMsgM.fromReply(chatMsg, localMid, MsgStatus.success);
             historyMsgMap.addAll({chatMsgM.mid: chatMsgM});
@@ -893,36 +890,7 @@ class VoceChatService {
     try {
       final uid = App.app.userDb?.uid;
       if (uid == null) return;
-      E2eCrypto.resetSessionDistFlags();
-
-      var protocolVer = 1;
-      try {
-        final proto = await E2eApi(App.app.chatServerM.fullUrl).getProtocol();
-        if (proto.statusCode == 200 && proto.data is Map) {
-          final m = Map<String, dynamic>.from(proto.data as Map);
-          protocolVer = (m['e2e_protocol_ver'] as num?)?.toInt() ?? 1;
-        }
-      } catch (_) {
-        // Fall back to v1 publish if protocol endpoint unavailable.
-      }
-
-      if (protocolVer < 2) {
-        final id = await E2eCrypto.ensureIdentity(uid);
-        await E2eApi(App.app.chatServerM.fullUrl).putIdentity(
-          deviceId: id.deviceId,
-          identityKeyPub: id.publicKeySpkiB64,
-        );
-        App.logger
-            .info('E2E v1 identity published for uid=$uid device=${id.deviceId}');
-      }
-
-      // Publish v2 last so /bundle prefers the SPK-capable device.
-      try {
-        await E2eV2Identity.bootstrapAndPublish(uid);
-      } catch (e) {
-        if (protocolVer >= 2) rethrow;
-        App.logger.warning('E2E v2 identity publish skipped: $e');
-      }
+      await E2eV2Identity.bootstrapAndPublish(uid);
     } catch (e) {
       App.logger.warning('E2E identity bootstrap failed: $e');
     }
@@ -1747,6 +1715,102 @@ class VoceChatService {
     return uuid();
   }
 
+  Future<bool> _rewriteMlsV2Record(ChatMsg chatMsg) async {
+    final detail = chatMsg.detail;
+    if (detail['content_type'] != typeE2eV2) return true;
+    final rawProperties = detail['properties'];
+    if (rawProperties is! Map || rawProperties['protocol'] != 'mls') {
+      return true;
+    }
+    final gid = (chatMsg.target['gid'] as num?)?.toInt();
+    final uid = App.app.userDb?.uid;
+    final content = detail['content'];
+    if (gid == null || uid == null || content is! String) {
+      throw const FormatException('invalid MLS chat record');
+    }
+    final deviceId = await E2eV2Identity.deviceId();
+    final service = MlsChannelService(
+      uid: uid,
+      deviceId: deviceId,
+      delivery: MlsApiDelivery(MlsApi(App.app.chatServerM.fullUrl)),
+      state: MlsStateStore(uid: uid, deviceId: deviceId),
+    );
+    await service.bootstrap();
+    final message = await service.processGroupRecord(
+      gid: gid,
+      mid: chatMsg.mid,
+      properties: E2eV2RoutingProperties.fromJson(rawProperties),
+      ciphertext: base64Decode(content),
+    );
+    if (message == null) return false;
+    final properties = Map<String, dynamic>.from(rawProperties);
+    properties['e2e'] = true;
+    properties['e2e_decrypted'] = true;
+    detail['properties'] = properties;
+    await _applyV2Application(detail, message.kind, message.body);
+    return true;
+  }
+
+  Future<void> _applyV2Application(
+      Map<String, dynamic> detail, int kind, Uint8List body) async {
+    final properties = Map<String, dynamic>.from(
+        (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
+    properties.remove('e2e_decrypt_failed');
+    if (kind == 5 || kind == 6 || kind == 7) {
+      final descriptor = await E2eV2Attachment.decodeDescriptor(body);
+      properties.addAll({
+        'e2e_v2_attachment': true,
+        'e2e_v2_key': base64Encode(descriptor.key),
+        'e2e_v2_nonce': base64Encode(descriptor.nonce),
+        'e2e_v2_sha256': base64Encode(descriptor.sha256),
+        'e2e_v2_path': descriptor.path,
+        'content_type': descriptor.mime,
+        'name': descriptor.name,
+        'size': descriptor.size,
+      });
+      detail['content_type'] = typeFile;
+      detail['content'] = descriptor.path;
+    } else if (kind == 1 || kind == 8) {
+      detail['content_type'] = kind == 8 ? typeMarkdown : typeText;
+      detail['content'] = utf8.decode(body);
+    } else if (kind == 2) {
+      final operation = jsonDecode(utf8.decode(body)) as Map;
+      properties['reply_mid'] = (operation['target_mid'] as num).toInt();
+      detail['content_type'] = typeText;
+      detail['content'] = operation['content'] as String;
+    } else if (kind == 3) {
+      final operation = jsonDecode(utf8.decode(body)) as Map;
+      final targetMid = (operation['target_mid'] as num).toInt();
+      final target = await ChatMsgDao().getMsgByMid(targetMid);
+      if (target != null) {
+        final targetDetail =
+            Map<String, dynamic>.from(jsonDecode(target.detail) as Map);
+        targetDetail['content'] = operation['content'] as String;
+        targetDetail['edited'] = DateTime.now().millisecondsSinceEpoch;
+        target.detail = jsonEncode(targetDetail);
+        await ChatMsgDao().update(target);
+        fireMsg(target, true);
+      }
+      properties['e2e_operation'] = true;
+      detail['content_type'] = typeText;
+      detail['content'] = '[Encrypted edit applied]';
+    } else if (kind == 4) {
+      properties['e2e_operation'] = true;
+      detail['content_type'] = typeText;
+      detail['content'] = '[Encrypted reaction]';
+    } else if (kind == 9 || kind == 10) {
+      final operation = jsonDecode(utf8.decode(body)) as Map;
+      final targetMid = (operation['target_mid'] as num).toInt();
+      await ChatMsgDao().deleteMsgByMid(targetMid);
+      properties['e2e_operation'] = true;
+      detail['content_type'] = typeText;
+      detail['content'] = '[Encrypted message removed]';
+    } else {
+      throw FormatException('unsupported E2EE v2 application kind $kind');
+    }
+    detail['properties'] = properties;
+  }
+
   Future<void> _handleMsgNormal(ChatMsg chatMsg) async {
     String localMid;
     final isSelf = chatMsg.fromUid == App.app.userDb!.uid;
@@ -1756,7 +1820,11 @@ class VoceChatService {
       localMid = uuid();
     }
 
-    final isE2e = chatMsg.detail['content_type'] == typeE2e;
+    final rawRouting = chatMsg.detail['properties'];
+    final isDrV2 = chatMsg.detail['content_type'] == typeE2eV2 &&
+        rawRouting is Map &&
+        rawRouting['protocol'] == 'dr';
+    final isE2e = chatMsg.detail['content_type'] == typeE2eV2;
 
     // CRITICAL: do NOT await slow E2E decrypt on the SSE event queue.
     // Decrypting here previously stalled "ready" and all subsequent chat pushes,
@@ -1771,7 +1839,7 @@ class VoceChatService {
       props['e2e_envelope'] = content;
       props['e2e_decrypt_failed'] = true;
       detail['properties'] = props;
-      // Keep content_type = typeE2e for decrypt-on-render.
+      // Keep the v2 envelope until background decryption succeeds.
     }
 
     try {
@@ -1779,8 +1847,8 @@ class VoceChatService {
       final decryptFailed = detail['properties'] is Map &&
           detail['properties']['e2e_decrypt_failed'] == true;
       if (isSelf && decryptFailed && !isE2e) {
-        final existing = await ChatMsgDao().first(
-            where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
+        final existing = await ChatMsgDao()
+            .first(where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
         if (existing != null) {
           existing.mid = chatMsg.mid;
           existing.statusStr = MsgStatus.success.name;
@@ -1791,8 +1859,8 @@ class VoceChatService {
       }
       // Own optimistic plaintext row: keep it when echo arrives as e2e.
       if (isSelf && isE2e) {
-        final existing = await ChatMsgDao().first(
-            where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
+        final existing = await ChatMsgDao()
+            .first(where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
         if (existing != null) {
           existing.mid = chatMsg.mid;
           existing.statusStr = MsgStatus.success.name;
@@ -1802,12 +1870,14 @@ class VoceChatService {
         }
       }
 
+      if (!await _rewriteMlsV2Record(chatMsg)) return;
+
       ChatMsgM chatMsgM =
           ChatMsgM.fromMsg(chatMsg, localMid, MsgStatus.success);
       await cumulateMsg(chatMsgM);
       await cumulateDmInfo(chatMsgM);
 
-      if (isE2e) {
+      if (isDrV2) {
         unawaited(_decryptPersistedE2e(chatMsgM));
       }
     } catch (e) {
@@ -1821,25 +1891,26 @@ class VoceChatService {
     if (myUid == null) return;
     try {
       final detail = Map<String, dynamic>.from(json.decode(chatMsgM.detail));
-      final ok =
-          await E2eCrypto.rewriteDetailInPlace(
-            uid: myUid,
-            detail: detail,
-            peerUid: chatMsgM.dmUid > 0 ? chatMsgM.dmUid : null,
-            fromUid: chatMsgM.fromUid,
-          )
-              .timeout(const Duration(seconds: 5), onTimeout: () => false);
-      if (!ok) return;
-      chatMsgM.detail = json.encode(detail);
-      await ChatMsgDao().update(chatMsgM);
-      // UI refresh only — OS toast already fired on envelope arrival.
-      fireMsg(chatMsgM, true, snippetOnly: true);
-      final props = detail['properties'];
-      if (props is Map && props['e2e_sk_dist'] == true) {
-        unawaited(retryPendingE2eDecrypts());
+      if (detail['content_type'] == typeE2eV2) {
+        final properties = Map<String, dynamic>.from(
+            (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
+        final envelope = detail['content'] as String? ?? '';
+        final event = await E2eV2Dm.decryptApplication(
+          uid: myUid,
+          peerUid: chatMsgM.fromUid,
+          content: envelope,
+          localId: properties['local_id'] ?? properties['cid'],
+        ).timeout(const Duration(seconds: 5));
+        if (event == null) return;
+        await _applyV2Application(detail, event.kind, event.body);
+        chatMsgM.detail = json.encode(detail);
+        await ChatMsgDao().update(chatMsgM);
+        fireMsg(chatMsgM, true, snippetOnly: true);
+        return;
       }
     } catch (e) {
-      App.logger.warning('Background E2E decrypt failed mid=${chatMsgM.mid}: $e');
+      App.logger
+          .warning('Background E2E decrypt failed mid=${chatMsgM.mid}: $e');
     }
   }
 
@@ -1870,116 +1941,27 @@ class VoceChatService {
     }
   }
 
-  /// Re-decrypt pending E2E rows after identity / sk_dist is available.
+  /// Retry generation-2 envelopes after identity/session state becomes available.
   Future<void> retryPendingE2eDecrypts() async {
-    final myUid = App.app.userDb?.uid;
-    if (myUid == null) return;
     try {
       final all = await ChatMsgDao().list(orderBy: '${ChatMsgM.F_mid} DESC');
-      var n = 0;
-      final lostEnvelope = <ChatMsgM>[];
       for (final m in all.take(500)) {
-        Map? detailMap;
+        Map? detail;
         try {
-          detailMap = json.decode(m.detail) as Map?;
+          detail = json.decode(m.detail) as Map?;
         } catch (_) {
           continue;
         }
-        if (detailMap == null) continue;
-        final ct = detailMap['content_type'] as String?;
-        final props = detailMap['properties'];
-        final failed = props is Map && props['e2e_decrypt_failed'] == true;
-        final hasEnv = props is Map && props['e2e_envelope'] is String;
-        if (ct != typeE2e && !(failed && hasEnv)) {
-          if (failed && !hasEnv) lostEnvelope.add(m);
-          continue;
-        }
-
-        final detail = Map<String, dynamic>.from(detailMap);
-        final ok =
-            await E2eCrypto.rewriteDetailInPlace(
-              uid: myUid,
-              detail: detail,
-              peerUid: m.dmUid > 0 ? m.dmUid : null,
-              fromUid: m.fromUid,
-            );
-        if (!ok) continue;
-
-        m.detail = json.encode(detail);
-        await ChatMsgDao().update(m);
-        fireMsg(m, true, snippetOnly: true);
-        n++;
-      }
-      if (lostEnvelope.isNotEmpty) {
-        n += await _rehydrateE2eEnvelopes(lostEnvelope, myUid);
-      }
-      if (n > 0) {
-        App.logger.info('E2E retry decrypted $n pending messages');
-        E2eCrypto.notifyKeysUpdated();
-      }
-    } catch (e) {
-      App.logger.warning('E2E retry failed: $e');
-    }
-  }
-
-  /// Recover envelopes previously overwritten with plaintext failure text.
-  Future<int> _rehydrateE2eEnvelopes(List<ChatMsgM> lost, int myUid) async {
-    final byDm = <int, List<ChatMsgM>>{};
-    final byGid = <int, List<ChatMsgM>>{};
-    for (final m in lost) {
-      if (m.isGroupMsg) {
-        byGid.putIfAbsent(m.gid, () => []).add(m);
-      } else if (m.dmUid > 0) {
-        byDm.putIfAbsent(m.dmUid, () => []).add(m);
-      }
-    }
-    var fixed = 0;
-    Future<void> applyList(List raw, Map<int, ChatMsgM> want) async {
-      for (final item in raw) {
-        try {
-          final chatMsg = ChatMsg.fromJson(item);
-          final local = want[chatMsg.mid];
-          if (local == null) continue;
-          if (chatMsg.detail['content_type'] != typeE2e) continue;
-          await E2eCrypto.rewriteDetailInPlace(
-            uid: myUid,
-            detail: chatMsg.detail,
-            peerUid: local.dmUid > 0 ? local.dmUid : null,
-            fromUid: local.fromUid,
-          );
-          local.detail = json.encode(chatMsg.detail);
-          await ChatMsgDao().update(local);
-          fireMsg(local, true, snippetOnly: true);
-          fixed++;
-        } catch (e) {
-          App.logger.warning('E2E rehydrate row failed: $e');
+        final properties = detail?['properties'];
+        if (detail?['content_type'] == typeE2eV2 &&
+            properties is Map &&
+            properties['e2e_decrypt_failed'] == true) {
+          await _decryptPersistedE2e(m);
         }
       }
+    } catch (error) {
+      App.logger.warning('E2EE v2 retry failed: $error');
     }
-
-    for (final entry in byDm.entries) {
-      try {
-        final res = await UserApi().getHistory(entry.key, null, limit: 100);
-        if (res.statusCode == 200 && res.data is List) {
-          await applyList(
-              res.data as List, {for (final m in entry.value) m.mid: m});
-        }
-      } catch (err) {
-        App.logger.warning('E2E rehydrate DM ${entry.key} failed: $err');
-      }
-    }
-    for (final entry in byGid.entries) {
-      try {
-        final res = await GroupApi().getHistory(entry.key, null, limit: 100);
-        if (res.statusCode == 200 && res.data is List) {
-          await applyList(
-              res.data as List, {for (final m in entry.value) m.mid: m});
-        }
-      } catch (err) {
-        App.logger.warning('E2E rehydrate channel ${entry.key} failed: $err');
-      }
-    }
-    return fixed;
   }
 
   Future<void> cumulateMsg(ChatMsgM chatMsgM) async {
@@ -2131,38 +2113,11 @@ class VoceChatService {
       localMid = uuid();
     }
 
-    final isE2e = chatMsg.detail['content_type'] == typeE2e;
-    if (isE2e) {
-      final detail = chatMsg.detail;
-      final content = detail['content'] as String? ?? '';
-      final props = Map<String, dynamic>.from(
-          (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
-      props['e2e'] = true;
-      props['e2e_envelope'] = content;
-      props['e2e_decrypt_failed'] = true;
-      detail['properties'] = props;
-    }
-
     try {
-      if (isSelf && isE2e) {
-        final existing = await ChatMsgDao().first(
-            where: '${ChatMsgM.F_localMid} = ?', whereArgs: [localMid]);
-        if (existing != null) {
-          existing.mid = chatMsg.mid;
-          existing.statusStr = MsgStatus.success.name;
-          await ChatMsgDao().update(existing);
-          fireMsg(existing, afterReady || _msgListeners.isNotEmpty);
-          return;
-        }
-      }
-
       ChatMsgM chatMsgM =
           ChatMsgM.fromReply(chatMsg, localMid, MsgStatus.success);
       await cumulateMsg(chatMsgM);
       await cumulateDmInfo(chatMsgM);
-      if (isE2e) {
-        unawaited(_decryptPersistedE2e(chatMsgM));
-      }
     } catch (e) {
       App.logger.severe(e);
     }

@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:vocechat_client/api/lib/mls_api.dart';
+import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 import 'package:vocechat_client/services/mls_channel_service.dart';
 import 'package:vocechat_client/services/mls_core.dart';
 import 'package:vocechat_client/services/mls_state_store.dart';
@@ -18,15 +18,19 @@ class _MemoryStore implements SecureValueStore {
 }
 
 class _FakeDelivery implements MlsDelivery {
-  final artifacts = <MlsArtifact>[];
+  final records =
+      <({int gid, E2eV2RoutingProperties properties, Uint8List payload})>[];
   Uint8List? published;
   Uint8List? consumable;
 
   @override
-  Future<int> append(String route, String deviceId, Uint8List artifact) async {
-    final sequence = artifacts.length + 1;
-    artifacts.add(MlsArtifact(sequence: sequence, payload: artifact));
-    return sequence;
+  Future<int> sendGroupRecord(
+    int gid,
+    E2eV2RoutingProperties properties,
+    Uint8List ciphertext,
+  ) async {
+    records.add((gid: gid, properties: properties, payload: ciphertext));
+    return records.length;
   }
 
   @override
@@ -54,9 +58,6 @@ class _FakeDelivery implements MlsDelivery {
   Future<void> putCredential(String deviceId, Uint8List credential) async {}
   @override
   Future<void> markInitialized(String route, String deviceId) async {}
-  @override
-  Future<List<MlsArtifact>> read(String route, {required int after}) async =>
-      artifacts.where((item) => item.sequence > after).toList();
   @override
   Future<String> routeForGroup(int gid) async =>
       '0123456789abcdef0123456789abcdef';
@@ -90,12 +91,17 @@ class _FakeCore implements MlsEngine {
   Uint8List decodeBytes(String value) => base64Decode(value);
   @override
   Future<Map<String, dynamic>> decrypt(
-          {required String groupState, required String privateMessage}) async =>
-      {
-        'event': 'application',
-        'group_state_b64': groupState,
-        'plaintext_b64': privateMessage
-      };
+      {required String groupState, required String privateMessage}) async {
+    if (base64Decode(privateMessage).singleOrNull == 6) {
+      return {'event': 'commit', 'group_state_b64': groupState};
+    }
+    return {
+      'event': 'application',
+      'group_state_b64': groupState,
+      'plaintext_b64': privateMessage
+    };
+  }
+
   @override
   Future<Map<String, dynamic>> encodeApplication(
           {required int kind,
@@ -123,6 +129,10 @@ class _FakeCore implements MlsEngine {
       {'identities_b64': identities};
 
   @override
+  Future<Map<String, dynamic>> groupInfo(String groupState) async =>
+      {'epoch': 1};
+
+  @override
   Future<Map<String, dynamic>> removeMembers(
           {required String groupState,
           required List<String> identities}) async =>
@@ -133,6 +143,100 @@ class _FakeCore implements MlsEngine {
 }
 
 void main() {
+  test('channel send uses canonical group records instead of MLS artifacts',
+      () async {
+    final delivery = _FakeDelivery()..consumable = Uint8List.fromList([9]);
+    final service = MlsChannelService(
+      uid: 7,
+      deviceId: 'Android:install-1',
+      delivery: delivery,
+      state: MlsStateStore(
+        secure: _MemoryStore(),
+        uid: 7,
+        deviceId: 'Android:install-1',
+      ),
+      core: _FakeCore(),
+    );
+
+    final mid = await service.sendText(9, 'canonical message', const [8]);
+
+    expect(mid, 3);
+    expect(delivery.records.map((record) => record.gid), everyElement(9));
+    expect(
+      delivery.records.map((record) => record.properties.wireClass),
+      [
+        E2eV2WireClass.mlsHandshake,
+        E2eV2WireClass.mlsHandshake,
+        E2eV2WireClass.mlsApplication,
+      ],
+    );
+  });
+
+  test('canonical group records are consumed in mid order', () async {
+    final delivery = _FakeDelivery();
+    final state = MlsStateStore(
+      secure: _MemoryStore(),
+      uid: 8,
+      deviceId: 'Android:receiver',
+    );
+    await state.writeDeviceState('device');
+    final service = MlsChannelService(
+      uid: 8,
+      deviceId: 'Android:receiver',
+      delivery: delivery,
+      state: state,
+      core: _FakeCore(),
+    );
+    final commitId = 'commit-1';
+
+    expect(
+      await service.processGroupRecord(
+        gid: 9,
+        mid: 1,
+        properties: E2eV2RoutingProperties.mlsHandshake(
+          handshakeKind: E2eV2HandshakeKind.commit,
+          commitId: commitId,
+          senderDeviceId: 'Android:sender',
+          localId: 'commit-local',
+          epoch: 1,
+        ),
+        ciphertext: Uint8List.fromList([6]),
+      ),
+      isNull,
+    );
+    expect(
+      await service.processGroupRecord(
+        gid: 9,
+        mid: 2,
+        properties: E2eV2RoutingProperties.mlsHandshake(
+          handshakeKind: E2eV2HandshakeKind.welcome,
+          commitId: commitId,
+          senderDeviceId: 'Android:sender',
+          localId: 'welcome-local',
+          epoch: 1,
+        ),
+        ciphertext: Uint8List.fromList([8]),
+      ),
+      isNull,
+    );
+    final message = await service.processGroupRecord(
+      gid: 9,
+      mid: 3,
+      properties: E2eV2RoutingProperties.mls(
+        wireClass: E2eV2WireClass.mlsApplication,
+        senderDeviceId: 'Android:sender',
+        localId: 'application-local',
+        epoch: 1,
+        generation: 0,
+      ),
+      ciphertext: Uint8List.fromList(utf8.encode('hello')),
+    );
+
+    expect(message?.sequence, 3);
+    expect(message?.text, 'hello');
+    expect(await state.readCursor(await delivery.routeForGroup(9)), 3);
+  });
+
   test('channel send stores secrets locally and uploads only opaque bytes',
       () async {
     final secure = _MemoryStore();
@@ -153,7 +257,7 @@ void main() {
     await service.sendText(9, 'secret text', const [7]);
 
     expect(delivery.published, [7]);
-    expect(delivery.artifacts.single.payload, [0, 255, 1]);
+    expect(delivery.records.single.payload, [0, 255, 1]);
     expect(secure.values.values.join(), isNot(contains('secret text')));
   });
 
@@ -176,7 +280,7 @@ void main() {
 
     await service.sendText(9, 'new epoch', const [8]);
 
-    expect(delivery.artifacts.map((item) => item.payload.toList()), [
+    expect(delivery.records.map((item) => item.payload.toList()), [
       [6],
       [8],
       [0, 255, 1],
@@ -200,7 +304,7 @@ void main() {
 
     await service.sendText(9, 'no duplicate leaf', const [8]);
 
-    expect(delivery.artifacts.map((item) => item.payload.toList()), [
+    expect(delivery.records.map((item) => item.payload.toList()), [
       [0, 255, 1],
     ]);
     expect(delivery.consumable, isNotNull);
@@ -224,7 +328,7 @@ void main() {
 
     await service.sendText(9, 'new membership', const [8]);
 
-    expect(delivery.artifacts.map((item) => item.payload.toList()), [
+    expect(delivery.records.map((item) => item.payload.toList()), [
       [5],
       [6],
       [8],

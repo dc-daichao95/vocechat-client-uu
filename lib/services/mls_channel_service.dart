@@ -3,12 +3,11 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:vocechat_client/api/lib/group_api.dart';
 import 'package:vocechat_client/api/lib/mls_api.dart';
+import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 import 'package:vocechat_client/services/mls_core.dart';
 import 'package:vocechat_client/services/mls_state_store.dart';
-
-const int _mlsMidNamespace = 4000000000000000;
-int mlsDisplayMid(int sequence) => _mlsMidNamespace + sequence;
 
 abstract class MlsDelivery {
   Future<void> putCredential(String deviceId, Uint8List credential);
@@ -17,16 +16,21 @@ abstract class MlsDelivery {
   Future<void> publishKeyPackage(String deviceId, Uint8List package);
   Future<Uint8List?> consumeKeyPackage(int uid, String deviceId);
   Future<String> routeForGroup(int gid);
-  Future<int> append(String route, String deviceId, Uint8List artifact);
-  Future<List<MlsArtifact>> read(String route, {required int after});
+  Future<int> sendGroupRecord(
+    int gid,
+    E2eV2RoutingProperties properties,
+    Uint8List ciphertext,
+  );
   Future<int> claimInitialization(String route, String deviceId);
   Future<void> markInitialized(String route, String deviceId);
 }
 
 class MlsApiDelivery implements MlsDelivery {
   final MlsApi api;
+  final GroupApi groupApi;
 
-  MlsApiDelivery(this.api);
+  MlsApiDelivery(this.api, {GroupApi? groupApi})
+      : groupApi = groupApi ?? GroupApi();
 
   @override
   Future<void> putCredential(String deviceId, Uint8List credential) async {
@@ -65,12 +69,20 @@ class MlsApiDelivery implements MlsDelivery {
       utf8.decode((await api.routeForGroup(gid)).data ?? Uint8List(0));
 
   @override
-  Future<int> append(String route, String deviceId, Uint8List artifact) async {
-    final bytes = (await api.append(route, deviceId, artifact)).data;
-    if (bytes == null || bytes.length != 8) {
-      throw const FormatException('invalid MLS sequence response');
+  Future<int> sendGroupRecord(
+    int gid,
+    E2eV2RoutingProperties properties,
+    Uint8List ciphertext,
+  ) async {
+    final response = await groupApi.sendE2eV2Msg(
+      gid,
+      base64Encode(ciphertext),
+      properties,
+    );
+    if (response.statusCode != 200 || response.data == null) {
+      throw StateError('MLS group record send failed: ${response.statusCode}');
     }
-    return ByteData.sublistView(bytes).getUint64(0, Endian.big);
+    return response.data!;
   }
 
   @override
@@ -85,12 +97,6 @@ class MlsApiDelivery implements MlsDelivery {
   @override
   Future<void> markInitialized(String route, String deviceId) async {
     await api.markInitialized(route, deviceId);
-  }
-
-  @override
-  Future<List<MlsArtifact>> read(String route, {required int after}) async {
-    final bytes = (await api.read(route, after: after)).data ?? Uint8List(0);
-    return MlsApi.decodeBatch(bytes);
   }
 }
 
@@ -134,11 +140,46 @@ class MlsChannelService {
         core = core ?? MlsCore();
 
   static String _validDeviceId(String value) {
-    final normalized = value.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
-    if (normalized.isEmpty || normalized.length > 128) {
+    if (value.isEmpty ||
+        value.length > 128 ||
+        !RegExp(r'^[A-Za-z0-9:_-]+$').hasMatch(value)) {
       throw ArgumentError.value(value, 'deviceId');
     }
-    return normalized;
+    return value;
+  }
+
+  String _randomId(String prefix) {
+    final bytes = Uint8List(16);
+    final random = Random.secure();
+    for (var index = 0; index < bytes.length; index++) {
+      bytes[index] = random.nextInt(256);
+    }
+    return '$prefix-${base64UrlEncode(bytes).replaceAll('=', '')}';
+  }
+
+  Future<int> _epoch(String groupState) async {
+    final info = await core.groupInfo(groupState);
+    return (info['epoch'] as num).toInt();
+  }
+
+  Future<int> _sendHandshake({
+    required int gid,
+    required String groupState,
+    required E2eV2HandshakeKind kind,
+    required String commitId,
+    required Uint8List ciphertext,
+  }) async {
+    return delivery.sendGroupRecord(
+      gid,
+      E2eV2RoutingProperties.mlsHandshake(
+        handshakeKind: kind,
+        commitId: commitId,
+        senderDeviceId: deviceId,
+        localId: _randomId('mls-handshake'),
+        epoch: await _epoch(groupState),
+      ),
+      ciphertext,
+    );
   }
 
   Future<void> bootstrap() async {
@@ -166,12 +207,9 @@ class MlsChannelService {
     await bootstrap();
     final route = await delivery.routeForGroup(gid);
     if (await state.readGroupState(route) != null) {
-      await synchronizeRoute(route);
-      await _admitAvailableDevices(route, memberUids);
+      await _admitAvailableDevices(gid, route, memberUids);
       return route;
     }
-    await synchronizeRoute(route);
-    if (await state.readGroupState(route) != null) return route;
 
     final claim = await delivery.claimInitialization(route, deviceId);
     if (claim != 1) {
@@ -187,13 +225,13 @@ class MlsChannelService {
       groupId: utf8.encode(route),
     );
     await state.writeGroupState(route, created['group_state_b64'] as String);
-    await _admitAvailableDevices(route, memberUids);
+    await _admitAvailableDevices(gid, route, memberUids);
     await delivery.markInitialized(route, deviceId);
     return route;
   }
 
   Future<void> _admitAvailableDevices(
-      String route, Iterable<int> memberUids) async {
+      int gid, String route, Iterable<int> memberUids) async {
     var groupState = await state.readGroupState(route);
     if (groupState == null) return;
     final members = await core.memberIdentities(groupState);
@@ -218,10 +256,12 @@ class MlsChannelService {
       );
       groupState = removed['group_state_b64'] as String;
       await state.writeGroupState(route, groupState);
-      await delivery.append(
-        route,
-        deviceId,
-        core.decodeBytes(removed['commit_b64'] as String),
+      await _sendHandshake(
+        gid: gid,
+        groupState: groupState,
+        kind: E2eV2HandshakeKind.commit,
+        commitId: _randomId('mls-commit'),
+        ciphertext: core.decodeBytes(removed['commit_b64'] as String),
       );
       admitted.removeAll(removals);
     }
@@ -236,20 +276,32 @@ class MlsChannelService {
     if (packages.isEmpty) return;
     final added =
         await core.addMembers(groupState: groupState, keyPackages: packages);
-    await state.writeGroupState(route, added['group_state_b64'] as String);
-    await delivery.append(
-      route,
-      deviceId,
-      core.decodeBytes(added['commit_b64'] as String),
+    final addedGroupState = added['group_state_b64'] as String;
+    await state.writeGroupState(route, addedGroupState);
+    final commitId = _randomId('mls-commit');
+    await _sendHandshake(
+      gid: gid,
+      groupState: addedGroupState,
+      kind: E2eV2HandshakeKind.commit,
+      commitId: commitId,
+      ciphertext: core.decodeBytes(added['commit_b64'] as String),
     );
-    await delivery.append(
-      route,
-      deviceId,
-      core.decodeBytes(added['welcome_b64'] as String),
+    await _sendHandshake(
+      gid: gid,
+      groupState: addedGroupState,
+      kind: E2eV2HandshakeKind.welcome,
+      commitId: commitId,
+      ciphertext: core.decodeBytes(added['welcome_b64'] as String),
     );
   }
 
-  Future<int> sendText(int gid, String text, Iterable<int> memberUids) async {
+  Future<int> sendApplication(
+    int gid,
+    int kind,
+    Uint8List body,
+    Iterable<int> memberUids, {
+    Map<int, Uint8List> metadata = const {},
+  }) async {
     final route = await ensureGroup(gid, memberUids);
     final groupState = await state.readGroupState(route);
     if (groupState == null) throw StateError('MLS group state is missing');
@@ -257,11 +309,12 @@ class MlsChannelService {
     final timestamp = ByteData(8)
       ..setUint64(0, DateTime.now().millisecondsSinceEpoch, Endian.big);
     final encoded = await core.encodeApplication(
-      kind: 1,
-      body: utf8.encode(text),
+      kind: kind,
+      body: body,
       metadata: {
         1: sender.buffer.asUint8List(),
         2: timestamp.buffer.asUint8List(),
+        ...metadata,
       },
     );
     final encrypted = await core.encrypt(
@@ -269,71 +322,104 @@ class MlsChannelService {
       plaintext: encoded['plaintext_b64'] as String,
     );
     await state.writeGroupState(route, encrypted['group_state_b64'] as String);
-    return delivery.append(
-      route,
-      deviceId,
+    final updatedGroupState = encrypted['group_state_b64'] as String;
+    final epoch = await _epoch(updatedGroupState);
+    final generation = await state.nextSendGeneration(route, epoch);
+    return delivery.sendGroupRecord(
+      gid,
+      E2eV2RoutingProperties.mls(
+        wireClass: E2eV2WireClass.mlsApplication,
+        senderDeviceId: deviceId,
+        localId: _randomId('mls-application'),
+        epoch: epoch,
+        generation: generation,
+      ),
       core.decodeBytes(encrypted['private_message_b64'] as String),
     );
   }
 
-  Future<List<MlsApplicationMessage>> synchronizeGroup(int gid) async {
-    final route = await delivery.routeForGroup(gid);
-    return synchronizeRoute(route);
-  }
+  Future<int> sendText(int gid, String text, Iterable<int> memberUids) =>
+      sendApplication(
+          gid, 1, Uint8List.fromList(utf8.encode(text)), memberUids);
 
-  Future<List<MlsApplicationMessage>> synchronizeRoute(String route) async {
-    final cursor = await state.readCursor(route);
-    final artifacts = await delivery.read(route, after: cursor);
-    final messages = <MlsApplicationMessage>[];
-    for (final artifact in artifacts) {
-      var groupState = await state.readGroupState(route);
-      if (groupState == null) {
-        final deviceState = await state.readDeviceState();
-        if (deviceState != null) {
-          try {
-            final joined = await core.joinGroup(
-              deviceState: deviceState,
-              welcome: base64Encode(artifact.payload),
-            );
-            await state.writeGroupState(
-                route, joined['group_state_b64'] as String);
-            await state.writeCursor(route, artifact.sequence);
-            continue;
-          } catch (_) {
-            // An artifact not addressed to this device is intentionally opaque.
-          }
-        }
-      } else {
-        try {
-          final decrypted = await core.decrypt(
-            groupState: groupState,
-            privateMessage: base64Encode(artifact.payload),
-          );
-          groupState = decrypted['group_state_b64'] as String;
-          await state.writeGroupState(route, groupState);
-          if (decrypted['event'] == 'commit') {
-            await state.writeCursor(route, artifact.sequence);
-            continue;
-          }
-          final decoded = await core
-              .decodeApplication(decrypted['plaintext_b64'] as String);
-          messages.add(MlsApplicationMessage(
-            sequence: artifact.sequence,
-            kind: decoded['kind'] as int,
-            body: core.decodeBytes(decoded['body_b64'] as String),
-            metadata: (decoded['metadata'] as Map).map(
-              (key, value) => MapEntry(
-                int.parse('$key'),
-                core.decodeBytes('$value'),
-              ),
-            ),
-          ));
-        } catch (_) {
-          // Welcome messages for other devices and own echoes are not decryptable.
-        }
-      }
-      await state.writeCursor(route, artifact.sequence);
+  Future<MlsApplicationMessage?> processGroupRecord({
+    required int gid,
+    required int mid,
+    required E2eV2RoutingProperties properties,
+    required Uint8List ciphertext,
+  }) async {
+    if (mid <= 0 || properties.protocol != E2eV2Protocol.mls) {
+      throw ArgumentError('invalid canonical MLS record');
     }
-    return messages;
+    final route = await delivery.routeForGroup(gid);
+    final cursor = await state.readCursor(route);
+    if (mid <= cursor) return null;
+    if (properties.senderDeviceId == deviceId) {
+      await state.writeCursor(route, mid);
+      return null;
+    }
+
+    var groupState = await state.readGroupState(route);
+    if (properties.wireClass == E2eV2WireClass.mlsHandshake) {
+      if (properties.handshakeKind == E2eV2HandshakeKind.welcome &&
+          groupState == null) {
+        final deviceState = await state.readDeviceState();
+        if (deviceState == null) {
+          throw StateError('MLS device state is missing');
+        }
+        final joined = await core.joinGroup(
+          deviceState: deviceState,
+          welcome: base64Encode(ciphertext),
+        );
+        await state.writeGroupState(
+          route,
+          joined['group_state_b64'] as String,
+        );
+      } else if (properties.handshakeKind == E2eV2HandshakeKind.commit &&
+          groupState != null) {
+        final processed = await core.decrypt(
+          groupState: groupState,
+          privateMessage: base64Encode(ciphertext),
+        );
+        if (processed['event'] != 'commit') {
+          throw const FormatException('expected MLS Commit');
+        }
+        await state.writeGroupState(
+          route,
+          processed['group_state_b64'] as String,
+        );
+      }
+      await state.writeCursor(route, mid);
+      return null;
+    }
+
+    if (properties.wireClass != E2eV2WireClass.mlsApplication ||
+        groupState == null) {
+      throw StateError('MLS application state is unavailable');
+    }
+    final decrypted = await core.decrypt(
+      groupState: groupState,
+      privateMessage: base64Encode(ciphertext),
+    );
+    if (decrypted['event'] != 'application') {
+      throw const FormatException('expected MLS application message');
+    }
+    groupState = decrypted['group_state_b64'] as String;
+    await state.writeGroupState(route, groupState);
+    final decoded =
+        await core.decodeApplication(decrypted['plaintext_b64'] as String);
+    final message = MlsApplicationMessage(
+      sequence: mid,
+      kind: decoded['kind'] as int,
+      body: core.decodeBytes(decoded['body_b64'] as String),
+      metadata: (decoded['metadata'] as Map).map(
+        (key, value) => MapEntry(
+          int.parse('$key'),
+          core.decodeBytes('$value'),
+        ),
+      ),
+    );
+    await state.writeCursor(route, mid);
+    return message;
   }
 }

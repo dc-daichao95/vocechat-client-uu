@@ -1,6 +1,5 @@
 // ignore_for_file: invalid_use_of_protected_member, invalid_use_of_visible_for_testing_member
 
-import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
@@ -8,15 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import 'package:vocechat_client/api/lib/group_api.dart';
-import 'package:vocechat_client/api/lib/message_api.dart';
-import 'package:vocechat_client/api/lib/mls_api.dart';
 import 'package:vocechat_client/api/lib/saved_api.dart';
 import 'package:vocechat_client/api/lib/user_api.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/app_consts.dart';
-import 'package:vocechat_client/api/models/msg/chat_msg.dart';
-import 'package:vocechat_client/api/models/msg/msg_normal.dart';
-import 'package:vocechat_client/api/models/msg/msg_target_group.dart';
 import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
 import 'package:vocechat_client/dao/init_dao/contacts.dart';
 import 'package:vocechat_client/dao/init_dao/group_info.dart';
@@ -25,9 +19,6 @@ import 'package:vocechat_client/globals.dart' as globals;
 import 'package:vocechat_client/models/ui_models/chat_page_controller.dart';
 import 'package:vocechat_client/models/ui_models/msg_tile_data.dart';
 import 'package:vocechat_client/services/file_handler.dart';
-import 'package:vocechat_client/services/e2e_v2_identity.dart';
-import 'package:vocechat_client/services/mls_channel_service.dart';
-import 'package:vocechat_client/services/mls_state_store.dart';
 import 'package:vocechat_client/services/file_handler/audio_file_handler.dart';
 import 'package:vocechat_client/services/voce_audio_service.dart';
 import 'package:vocechat_client/services/voce_send_service.dart';
@@ -130,8 +121,6 @@ class _VoceChatPageState extends State<VoceChatPage>
 
   /// The animation controller for the message tile.
   late final AnimationController _aniController;
-  Timer? _mlsTimer;
-  bool _mlsSyncing = false;
 
   void showBusyDialog() {
     _isBusy.value = true;
@@ -165,13 +154,6 @@ class _VoceChatPageState extends State<VoceChatPage>
       enableContact.value =
           chatServerM.properties.commonInfo?.contactVerificationEnable == true;
     });
-    if (widget.isChannel) {
-      unawaited(_syncMlsChannel());
-      _mlsTimer = Timer.periodic(
-        const Duration(seconds: 4),
-        (_) => unawaited(_syncMlsChannel()),
-      );
-    }
   }
 
   @override
@@ -181,7 +163,6 @@ class _VoceChatPageState extends State<VoceChatPage>
 
   @override
   void dispose() {
-    _mlsTimer?.cancel();
     VoceAudioService().clear();
     widget.controller.removeScrollToBottomListener(_scrollToBottom);
     widget.controller.scrollToMidNotifier
@@ -266,7 +247,6 @@ class _VoceChatPageState extends State<VoceChatPage>
     try {
       await SharedFuncs.renewAuthToken(forceRefresh: true);
       await App.app.chatService.initPersistentConnection();
-      await _syncMlsChannel();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Refreshed')),
@@ -276,57 +256,6 @@ class _VoceChatPageState extends State<VoceChatPage>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Refresh failed')),
       );
-    }
-  }
-
-  Future<void> _syncMlsChannel() async {
-    if (_mlsSyncing || !widget.isChannel) return;
-    _mlsSyncing = true;
-    try {
-      final uid = App.app.userDb?.uid;
-      final gid = widget.groupInfoNotifier?.value.gid;
-      if (uid == null || gid == null) return;
-      final rawDeviceId = await E2eV2Identity.deviceId();
-      final deviceId =
-          rawDeviceId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
-      final service = MlsChannelService(
-        uid: uid,
-        deviceId: deviceId,
-        delivery: MlsApiDelivery(MlsApi(App.app.chatServerM.fullUrl)),
-        state: MlsStateStore(uid: uid, deviceId: deviceId),
-      );
-      await service.bootstrap();
-      final messages = await service.synchronizeGroup(gid);
-      for (final incoming in messages) {
-        if (incoming.kind != 1 || incoming.senderUid == null) continue;
-        final mid = mlsDisplayMid(incoming.sequence);
-        final existing = await ChatMsgDao().first(
-          where: '${ChatMsgM.F_mid} = ?',
-          whereArgs: [mid],
-        );
-        if (existing != null) continue;
-        final localMid = 'mls-$gid-${incoming.sequence}';
-        final detail = MsgNormal(
-          properties: {'cid': localMid, 'sequence': incoming.sequence},
-          contentType: typeText,
-          content: incoming.text,
-        );
-        final message = ChatMsg(
-          target: MsgTargetGroup(gid).toJson(),
-          mid: mid,
-          fromUid: incoming.senderUid!,
-          createdAt: incoming.createdAt ??
-              DateTime.now().millisecondsSinceEpoch,
-          detail: detail.toJson(),
-        );
-        final model = ChatMsgM.fromMsg(message, localMid, MsgStatus.success);
-        await ChatMsgDao().addOrUpdate(model);
-        App.app.chatService.fireMsg(model, true);
-      }
-    } catch (error) {
-      App.logger.warning('MLS channel synchronization failed: $error');
-    } finally {
-      _mlsSyncing = false;
     }
   }
 
@@ -867,45 +796,25 @@ class _VoceChatPageState extends State<VoceChatPage>
 
   Future<bool> delete(ChatMsgM old) async {
     try {
-      await MessageApi().delete(old.mid).then((response) async {
-        if (response.statusCode == 200 || (old.status != MsgStatus.success)) {
-          // successfully deleted or failed to send.
+      if (old.status == MsgStatus.success) {
+        await VoceSendService().sendDelete(old);
+      }
+      FileHandler.singleton.deleteWithChatMsgM(old);
+      AudioFileHandler().deleteWithChatMsgM(old);
+      final successful = await ChatMsgDao().deleteMsgByLocalMid(old);
+      if (!successful) return false;
+      widget.controller.onDeleteWithLocalMid(old.localMid);
 
-          FileHandler.singleton.deleteWithChatMsgM(old);
-          AudioFileHandler().deleteWithChatMsgM(old);
-
-          ChatMsgDao().deleteMsgByLocalMid(old).then((successful) async {
-            if (successful) {
-              widget.controller.onDeleteWithLocalMid(old.localMid);
-
-              int curMaxMid;
-
-              if (old.isGroupMsg) {
-                curMaxMid = await ChatMsgDao().getChannelMaxMid(old.gid);
-              } else {
-                curMaxMid = await ChatMsgDao().getDmMaxMid(old.dmUid);
-              }
-              if (curMaxMid > -1) {
-                final msg = await ChatMsgDao().getMsgByMid(curMaxMid);
-
-                if (msg != null) {
-                  App.app.chatService.fireMsg(msg, true, snippetOnly: true);
-                }
-              }
-
-              return true;
-            }
-          });
-        } else {
-          App.logger.severe("Message deletion failed. Message: $old");
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content:
-                    Text(AppLocalizations.of(context)!.messageDeletionFailed)));
-          }
-          return false;
+      final curMaxMid = old.isGroupMsg
+          ? await ChatMsgDao().getChannelMaxMid(old.gid)
+          : await ChatMsgDao().getDmMaxMid(old.dmUid);
+      if (curMaxMid > -1) {
+        final msg = await ChatMsgDao().getMsgByMid(curMaxMid);
+        if (msg != null) {
+          App.app.chatService.fireMsg(msg, true, snippetOnly: true);
         }
-      });
+      }
+      return true;
     } catch (e) {
       App.logger.severe("Message deletion failed. Message: $old, Error: $e");
       if (mounted) {

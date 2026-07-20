@@ -8,14 +8,13 @@ import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
 import 'package:vocechat_client/api/lib/e2e_api.dart';
-import 'package:vocechat_client/api/lib/group_api.dart';
-import 'package:vocechat_client/api/lib/message_api.dart';
 import 'package:vocechat_client/api/lib/mls_api.dart';
 import 'package:vocechat_client/api/lib/resource_api.dart';
 import 'package:vocechat_client/api/lib/user_api.dart';
-import 'package:vocechat_client/services/e2e_crypto.dart';
+import 'package:vocechat_client/services/e2e_v2_attachment.dart';
 import 'package:vocechat_client/services/e2e_v2_dm.dart';
 import 'package:vocechat_client/services/e2e_v2_identity.dart';
+import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 import 'package:vocechat_client/services/mls_channel_service.dart';
 import 'package:vocechat_client/services/mls_state_store.dart';
 import 'package:vocechat_client/api/models/msg/chat_msg.dart';
@@ -24,7 +23,6 @@ import 'package:vocechat_client/api/models/msg/msg_reply.dart';
 import 'package:vocechat_client/api/models/msg/msg_target_group.dart';
 import 'package:vocechat_client/api/models/msg/msg_target_user.dart';
 import 'package:vocechat_client/api/models/resource/file_prepare_request.dart';
-import 'package:vocechat_client/api/models/resource/file_upload_response.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/app_consts.dart';
 import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
@@ -72,8 +70,7 @@ class VoceSendService {
   VoceSendService._internal();
 
   Future<MlsChannelService> _mlsChannelService(int uid) async {
-    final rawDeviceId = await E2eV2Identity.deviceId();
-    final deviceId = rawDeviceId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
+    final deviceId = await E2eV2Identity.deviceId();
     return MlsChannelService(
       uid: uid,
       deviceId: deviceId,
@@ -82,30 +79,26 @@ class VoceSendService {
     );
   }
 
-  /// Collect published identity pubs for [uids] (snake_case or camelCase).
-  Future<List<({int uid, String identityKeyPub})>> _collectIdentityPubs(
-      E2eApi e2eApi, Iterable<int> uids) async {
-    final out = <({int uid, String identityKeyPub})>[];
-    final seen = <String>{};
-    for (final u in uids) {
-      try {
-        final idRes = await e2eApi.getIdentity(u);
-        dynamic arr = idRes.data;
-        if (arr is Map && arr['data'] is List) arr = arr['data'];
-        if (arr is! List) continue;
-        for (final row in arr) {
-          if (row is! Map) continue;
-          final pub = (row['identity_key_pub'] ?? row['identityKeyPub'])
-              as String?;
-          if (pub == null || pub.isEmpty || seen.contains(pub)) continue;
-          seen.add(pub);
-          out.add((uid: u, identityKeyPub: pub));
-        }
-      } catch (e) {
-        App.logger.warning('getIdentity($u) failed: $e');
+  Future<List<Map>> _collectV2Bundles(E2eApi e2eApi, Iterable<int> uids) async {
+    final bundles = <Map>[];
+    for (final uid in uids.toSet()) {
+      final identities = await e2eApi.getIdentity(uid);
+      if (identities.data is! List) continue;
+      for (final row in identities.data as List) {
+        if (row is! Map || row['signed_prekey_pub'] == null) continue;
+        try {
+          final response = await e2eApi.getBundle(
+            uid,
+            deviceId: row['device_id'] as String?,
+          );
+          if (response.data is Map &&
+              E2eV2Dm.peerSupportsV2(response.data as Map)) {
+            bundles.add({...response.data as Map, 'uid': uid});
+          }
+        } catch (_) {}
       }
     }
-    return out;
+    return bundles;
   }
 
   /// Public channels have empty members list — wrap for all known users (match Web).
@@ -115,7 +108,9 @@ class VoceSendService {
       final users = await UserInfoDao().getUserList() ?? [];
       return users.map((u) => u.uid).toList();
     }
-    return (infoJson['members'] as List?)?.map((e) => (e as num).toInt()).toList() ??
+    return (infoJson['members'] as List?)
+            ?.map((e) => (e as num).toInt())
+            .toList() ??
         gM?.groupInfo.members ??
         <int>[];
   }
@@ -132,11 +127,10 @@ class VoceSendService {
     String wireContent = content;
     String wireType = typeText;
     Map<String, dynamic> props = {"cid": localMid};
+    E2eV2RoutingProperties? v2Route;
     var e2eRequired = false;
     try {
       final e2eApi = E2eApi(App.app.chatServerM.fullUrl);
-      // Identity is published once at login (bootstrapE2e); only ensure local keys here.
-      await E2eCrypto.ensureIdentity(myUid);
       final dm = await e2eApi.getDmSetting(uid);
       // Server default-on: encrypt unless explicitly disabled
       final enabled = dm.data is! Map || dm.data['e2e_enabled'] != false;
@@ -160,6 +154,7 @@ class VoceSendService {
                 }
               }
             }
+
             collect(peerIds);
             collect(selfIds);
 
@@ -187,67 +182,25 @@ class VoceSendService {
                 peerUid: uid,
                 plaintext: content,
                 bundles: bundles,
+                localId: localMid,
               );
               if (enc != null) {
                 wireContent = enc.content;
-                wireType = typeE2e;
-                props = {...enc.properties, "cid": localMid};
+                wireType = typeE2eV2;
+                v2Route = enc.properties;
+                props = {...enc.properties.toJson(), "cid": localMid};
                 e2eRequired = true;
               }
             }
           }
         } catch (e) {
-          App.logger.warning('E2E v2 DM encrypt fallback to v1: $e');
+          throw StateError('E2EE v2 DM encryption failed: $e');
         }
 
-        if (wireType != typeE2e) {
-          var recipients = await _collectIdentityPubs(e2eApi, [myUid, uid]);
-          // Skip v2 JSON pubs on the v1 ECDH path.
-          recipients = recipients.where((r) {
-            try {
-              jsonDecode(r.identityKeyPub);
-              return false;
-            } catch (_) {
-              return true;
-            }
-          }).toList();
-          if (!recipients.any((r) => r.uid == uid)) {
-            try {
-              final bundle = await e2eApi.getBundle(uid);
-              final peerPub =
-                  (bundle.data as Map)['identity_key_pub'] as String?;
-              if (peerPub != null && peerPub.isNotEmpty) {
-                try {
-                  jsonDecode(peerPub);
-                } catch (_) {
-                  recipients = [
-                    ...recipients,
-                    (uid: uid, identityKeyPub: peerPub)
-                  ];
-                }
-              }
-            } catch (_) {}
-          }
-          final self = await E2eCrypto.ensureIdentity(myUid);
-          if (!recipients.any((r) => r.identityKeyPub == self.publicKeySpkiB64)) {
-            recipients = [
-              ...recipients,
-              (uid: myUid, identityKeyPub: self.publicKeySpkiB64)
-            ];
-          }
-          if (!recipients.any((r) => r.uid == uid)) {
-            throw StateError(
-              'E2E: peer has no v1 identity (v2 encrypt unavailable). Open both clients once.',
-            );
-          }
-          final enc = await E2eCrypto.encryptTextForPeer(
-            uid: myUid,
-            plaintext: content,
-            recipients: recipients,
+        if (wireType != typeE2eV2 || v2Route == null) {
+          throw StateError(
+            'Peer has no usable E2EE v2 device keys. Open both updated clients once.',
           );
-          wireContent = enc.content;
-          wireType = typeE2e;
-          props = {...enc.properties, "cid": localMid};
         }
       }
     } catch (e) {
@@ -283,8 +236,8 @@ class VoceSendService {
       final toBeFired = ChatMsgM.fromMsg(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
-      final Future<Response<int>> sendFuture = wireType == typeE2e
-          ? UserApi().sendE2eMsg(uid, wireContent, props)
+      final Future<Response<int>> sendFuture = wireType == typeE2eV2
+          ? UserApi().sendE2eV2Msg(uid, wireContent, v2Route!)
           : UserApi().sendTextMsg(uid, content, localMid);
 
       await sendFuture.then(
@@ -343,32 +296,21 @@ class VoceSendService {
       final toBeFired = ChatMsgM.fromMsg(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
-      await MessageApi().reply(targetMid, content, detail.properties).then(
-        (response) async {
-          if (response.statusCode == 200) {
-            final mid = response.data!;
-            message.mid = mid;
-            chatMsgM = ChatMsgM.fromMsg(message, localMid, MsgStatus.success);
-            await chatMsgDao.update(chatMsgM).then((value) {
-              App.app.chatService.fireMsg(chatMsgM, true);
-            }).onError((error, stackTrace) {
-              App.logger.severe(error);
-              App.app.chatService
-                  .fireMsg(chatMsgM..status = MsgStatus.fail, true);
-            });
-          } else {
-            App.logger.severe(
-                "Reply message send failed, statusCode: ${response.statusCode}");
-            _notifyE2eRequired(response);
-            App.app.chatService
-                .fireMsg(chatMsgM..status = MsgStatus.fail, true);
-          }
-        },
-      ).onError((error, stackTrace) {
+      try {
+        final mid = await _sendV2Operation(
+          chatMsgM,
+          2,
+          {'target_mid': targetMid, 'content': content},
+        );
+        message.mid = mid;
+        chatMsgM = ChatMsgM.fromReply(message, localMid, MsgStatus.success);
+        await chatMsgDao.update(chatMsgM);
+        App.app.chatService.fireMsg(chatMsgM, true);
+      } catch (error) {
         App.logger.severe(error);
         _notifyE2eRequired(error);
         App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-      });
+      }
     });
   }
 
@@ -399,8 +341,6 @@ class VoceSendService {
 
     final chatId = SharedFuncs.getChatId(uid: uid)!;
     final fileBytes = await file.readAsBytes();
-    Uint8List uploadBytes = fileBytes;
-
     if (isImage) {
       final decodedImage = await decodeImageFromList(await file.readAsBytes());
       properties
@@ -419,7 +359,6 @@ class VoceSendService {
         // TODO: change to save File instead of bytes.
         final thumbBytes =
             await FlutterImageCompress.compressWithList(fileBytes, quality: 25);
-        uploadBytes = thumbBytes;
         await FileHandler.singleton
             .saveImageThumb(chatId, thumbBytes, localMid, filename);
       }
@@ -452,17 +391,16 @@ class VoceSendService {
     final task = SendTask(
       localMid: localMid,
       sendTask: () => _uploadAndSendFileMaybeE2e(
-            mode: 'dm',
-            peerOrGid: uid,
-            mime: contentType,
-            filename: filename,
-            plainBytes: fileBytes,
-            uploadBytes: uploadBytes,
-            chatMsgM: chatMsgM,
-            progress: (p) {
-              progress0.value = p;
-            },
-          ),
+        mode: 'dm',
+        peerOrGid: uid,
+        mime: contentType,
+        filename: filename,
+        plainBytes: fileBytes,
+        chatMsgM: chatMsgM,
+        progress: (p) {
+          progress0.value = p;
+        },
+      ),
     );
     task.progress = progress0;
     SendTaskQueue.singleton.addTask(task);
@@ -517,10 +455,16 @@ class VoceSendService {
     ValueNotifier<double> progress0 = ValueNotifier(0);
     final task = SendTask(
       localMid: localMid,
-      sendTask: () => _uploadAndSendAudio(
-          contentType, filename, fileBytes, chatMsgM, (progress) {
-        progress0.value = progress;
-      }),
+      sendTask: () => _uploadAndSendFileMaybeE2e(
+        mode: 'dm',
+        peerOrGid: uid,
+        mime: contentType,
+        filename: filename,
+        plainBytes: fileBytes,
+        chatMsgM: chatMsgM,
+        applicationKind: 7,
+        progress: (value) => progress0.value = value,
+      ),
     );
     task.progress = progress0;
     SendTaskQueue.singleton.addTask(task);
@@ -548,14 +492,14 @@ class VoceSendService {
     final myUid = App.app.userDb!.uid;
 
     final Map<String, dynamic> props = {"cid": localMid, 'mentions': mentions};
-    late final int sequence;
+    late final int canonicalMid;
     try {
       final gM = await GroupInfoDao().getGroupByGid(gid);
       final infoJson = gM != null
           ? (jsonDecode(gM.info) as Map<String, dynamic>)
           : <String, dynamic>{};
       final memberIds = await _channelMemberUids(gM, infoJson);
-      sequence = await (await _mlsChannelService(myUid))
+      canonicalMid = await (await _mlsChannelService(myUid))
           .sendText(gid, content, <int>{myUid, ...memberIds});
     } catch (e) {
       App.logger.severe("MLS channel send failed: $e");
@@ -586,7 +530,7 @@ class VoceSendService {
       final toBeFired = ChatMsgM.fromMsg(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
-      message.mid = mlsDisplayMid(sequence);
+      message.mid = canonicalMid;
       chatMsgM = ChatMsgM.fromMsg(message, localMid, MsgStatus.success);
       await chatMsgDao.update(chatMsgM);
       App.app.chatService.fireMsg(chatMsgM, true);
@@ -633,32 +577,21 @@ class VoceSendService {
       final toBeFired = ChatMsgM.fromMsg(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
-      await MessageApi().reply(targetMid, content, detail.properties).then(
-        (response) async {
-          if (response.statusCode == 200) {
-            final mid = response.data!;
-            message.mid = mid;
-            chatMsgM = ChatMsgM.fromMsg(message, localMid, MsgStatus.success);
-            await chatMsgDao.update(chatMsgM).then((value) {
-              App.app.chatService.fireMsg(chatMsgM, true);
-            }).onError((error, stackTrace) {
-              App.logger.severe(error);
-              App.app.chatService
-                  .fireMsg(chatMsgM..status = MsgStatus.fail, true);
-            });
-          } else {
-            App.logger.severe(
-                "Reply message send failed, statusCode: ${response.statusCode}");
-            _notifyE2eRequired(response);
-            App.app.chatService
-                .fireMsg(chatMsgM..status = MsgStatus.fail, true);
-          }
-        },
-      ).onError((error, stackTrace) {
+      try {
+        final mid = await _sendV2Operation(
+          chatMsgM,
+          2,
+          {'target_mid': targetMid, 'content': content},
+        );
+        message.mid = mid;
+        chatMsgM = ChatMsgM.fromReply(message, localMid, MsgStatus.success);
+        await chatMsgDao.update(chatMsgM);
+        App.app.chatService.fireMsg(chatMsgM, true);
+      } catch (error) {
         App.logger.severe(error);
         _notifyE2eRequired(error);
         App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-      });
+      }
     });
   }
 
@@ -682,8 +615,6 @@ class VoceSendService {
 
     final chatId = SharedFuncs.getChatId(gid: gid)!;
     final fileBytes = await file.readAsBytes();
-    Uint8List uploadBytes = fileBytes;
-
     Map<String, dynamic> properties = {
       "cid": localMid,
       "content_type": contentType,
@@ -709,7 +640,6 @@ class VoceSendService {
         // TODO: change to save File instead of bytes.
         final thumbBytes =
             await FlutterImageCompress.compressWithList(fileBytes, quality: 25);
-        uploadBytes = thumbBytes;
         await FileHandler.singleton
             .saveImageThumb(chatId, thumbBytes, localMid, filename);
       }
@@ -742,17 +672,16 @@ class VoceSendService {
     final task = SendTask(
       localMid: localMid,
       sendTask: () => _uploadAndSendFileMaybeE2e(
-            mode: 'channel',
-            peerOrGid: gid,
-            mime: contentType,
-            filename: filename,
-            plainBytes: fileBytes,
-            uploadBytes: uploadBytes,
-            chatMsgM: chatMsgM,
-            progress: (p) {
-              progress0.value = p;
-            },
-          ),
+        mode: 'channel',
+        peerOrGid: gid,
+        mime: contentType,
+        filename: filename,
+        plainBytes: fileBytes,
+        chatMsgM: chatMsgM,
+        progress: (p) {
+          progress0.value = p;
+        },
+      ),
     );
     task.progress = progress0;
     SendTaskQueue.singleton.addTask(task);
@@ -805,10 +734,16 @@ class VoceSendService {
     ValueNotifier<double> progress0 = ValueNotifier(0);
     final task = SendTask(
       localMid: localMid,
-      sendTask: () => _uploadAndSendAudio(
-          contentType, filename, fileBytes, chatMsgM, (progress) {
-        progress0.value = progress;
-      }),
+      sendTask: () => _uploadAndSendFileMaybeE2e(
+        mode: 'channel',
+        peerOrGid: gid,
+        mime: contentType,
+        filename: filename,
+        plainBytes: fileBytes,
+        chatMsgM: chatMsgM,
+        applicationKind: 7,
+        progress: (value) => progress0.value = value,
+      ),
     );
     task.progress = progress0;
     SendTaskQueue.singleton.addTask(task);
@@ -821,282 +756,97 @@ class VoceSendService {
     required String mime,
     required String filename,
     required Uint8List plainBytes,
-    required Uint8List uploadBytes,
     required ChatMsgM chatMsgM,
+    int? applicationKind,
     void Function(double progress)? progress,
   }) async {
-    var e2eRequired = false;
     try {
       final myUid = App.app.userDb!.uid;
       final e2eApi = E2eApi(App.app.chatServerM.fullUrl);
-      await E2eCrypto.ensureIdentity(myUid);
-
-      bool e2eOn = false;
-      String? peerPub;
-      List<({int uid, String identityKeyPub})>? recipients;
       List<int> memberIds = [];
       if (mode == 'dm') {
         final dm = await e2eApi.getDmSetting(peerOrGid);
-        e2eOn = dm.data is! Map || dm.data['e2e_enabled'] != false;
-        if (e2eOn) {
-          recipients = [];
-          final seen = <String>{};
-          for (final u in [myUid, peerOrGid]) {
-            try {
-              final idRes = await e2eApi.getIdentity(u);
-              final arr = idRes.data;
-              if (arr is List) {
-                for (final row in arr) {
-                  if (row is! Map) continue;
-                  final pub = row['identity_key_pub'] as String?;
-                  if (pub == null || pub.isEmpty || seen.contains(pub)) {
-                    continue;
-                  }
-                  seen.add(pub);
-                  recipients.add((uid: u, identityKeyPub: pub));
-                }
-              }
-            } catch (_) {}
-          }
-          if (recipients.isEmpty) {
-            final bundle = await e2eApi.getBundle(peerOrGid);
-            peerPub = (bundle.data as Map)['identity_key_pub'] as String?;
-          }
+        if (dm.data is Map && dm.data['e2e_enabled'] == false) {
+          throw StateError('E2EE v2 is required for attachments');
         }
       } else {
         final gM = await GroupInfoDao().getGroupByGid(peerOrGid);
         final infoJson = gM != null
             ? (jsonDecode(gM.info) as Map<String, dynamic>)
             : <String, dynamic>{};
-        e2eOn = infoJson['e2e_enabled'] != false;
         memberIds = await _channelMemberUids(gM, infoJson);
-        if (e2eOn) {
-          recipients = await _collectIdentityPubs(
-              e2eApi, <int>{myUid, ...memberIds});
-          final self = await E2eCrypto.ensureIdentity(myUid);
-          if (!recipients!
-              .any((r) => r.identityKeyPub == self.publicKeySpkiB64)) {
-            recipients = [
-              ...recipients!,
-              (uid: myUid, identityKeyPub: self.publicKeySpkiB64)
-            ];
-          }
-        }
       }
 
-      if (e2eOn) {
-        e2eRequired = true;
-        final enc = await E2eCrypto.encryptFileBytes(
-          uid: myUid,
-          mode: mode == 'channel' ? 'channel' : 'dm',
-          plain: plainBytes,
-          name: filename,
+      final encrypted = await E2eV2Attachment.encryptBytes(plainBytes);
+      final prepareReq = FilePrepareRequest(
+          contentType: 'application/octet-stream', filename: '$filename.e2ee');
+      final fileId = (await ResourceApi().prepareFile(prepareReq)).data!;
+      final fileUploader = FileUploader(
+          fileBytes: encrypted.ciphertext,
+          fileId: fileId,
+          onUploadProgress: progress);
+      final uploadRes =
+          (await fileUploader.upload('application/octet-stream'))!.data!;
+      final descriptor = await E2eV2Attachment.encodeDescriptor(
+        E2eV2AttachmentDescriptor(
+          path: uploadRes.path,
+          key: encrypted.key,
+          nonce: encrypted.nonce,
+          sha256: encrypted.sha256,
           mime: mime.isEmpty ? 'application/octet-stream' : mime,
-          peerPublicKeyB64: peerPub,
-          recipients: recipients,
-          gid: mode == 'channel' ? peerOrGid : null,
+          name: filename,
+          size: plainBytes.length,
+        ),
+      );
+
+      late final int mid;
+      final eventKind = applicationKind ?? (mime.startsWith('image/') ? 6 : 5);
+      if (mode == 'channel') {
+        mid = await (await _mlsChannelService(myUid)).sendApplication(
+          peerOrGid,
+          eventKind,
+          descriptor,
+          <int>{myUid, ...memberIds},
         );
-
-        final prepareReq = FilePrepareRequest(
-            contentType: 'application/octet-stream',
-            filename: '$filename.e2e');
-        final resourceApi = ResourceApi();
-        final fileId = (await resourceApi.prepareFile(prepareReq)).data!;
-        final fileUploader = FileUploader(
-            fileBytes: enc.cipherBytes,
-            fileId: fileId,
-            onUploadProgress: progress);
-        final uploadRes =
-            (await fileUploader.upload('application/octet-stream'))!.data!;
-        final finalized = await enc.finalize(uploadRes.path);
-        final props = {
-          ...finalized.properties,
-          'cid': chatMsgM.localMid,
-        };
-
-        final Response<int> res = mode == 'channel'
-            ? await GroupApi()
-                .sendE2eMsg(peerOrGid, finalized.content, props)
-            : await UserApi()
-                .sendE2eMsg(peerOrGid, finalized.content, props);
-
-        if (res.statusCode == 200 && res.data != null) {
-          chatMsgM.mid = res.data!;
-          chatMsgM.status = MsgStatus.success;
-          // Keep local optimistic file UI; server stores e2e envelope.
-          await ChatMsgDao().add(chatMsgM).then((m) async {
-            App.app.chatService.fireMsg(m..status = MsgStatus.success, true);
-          });
-          return true;
+      } else {
+        final bundles = await _collectV2Bundles(e2eApi, [myUid, peerOrGid]);
+        final dm = await E2eV2Dm.encryptText(
+          uid: myUid,
+          peerUid: peerOrGid,
+          plaintext: '',
+          bundles: bundles,
+          localId: chatMsgM.localMid,
+          kind: eventKind,
+          body: descriptor,
+          mime: mime.isEmpty ? 'application/octet-stream' : mime,
+        );
+        if (dm == null) {
+          throw StateError('recipient has no usable E2EE v2 device');
         }
-        App.logger.severe(res.statusCode);
-        App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-        return false;
+        final response = await UserApi().sendE2eV2Msg(
+          peerOrGid,
+          dm.content,
+          dm.properties,
+        );
+        if (response.statusCode != 200 || response.data == null) {
+          throw StateError('encrypted attachment send failed');
+        }
+        mid = response.data!;
       }
+      chatMsgM.mid = mid;
+      chatMsgM.status = MsgStatus.success;
+      await ChatMsgDao().add(chatMsgM).then((message) async {
+        App.app.chatService.fireMsg(message..status = MsgStatus.success, true);
+      });
+      return true;
     } catch (e) {
       App.logger.severe("E2E file encrypt failed: $e");
-      if (e2eRequired) {
-        final ctx = navigatorKey.currentContext;
-        if (ctx != null) {
-          ScaffoldMessenger.of(ctx).showSnackBar(
-            SnackBar(content: Text('E2E encrypt failed: $e')),
-          );
-        }
-        App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-        return false;
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) {
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(content: Text('E2E encrypt failed: $e')),
+        );
       }
-    }
-
-    return _uploadAndSendFile(
-        mime, filename, uploadBytes, chatMsgM, progress);
-  }
-
-  /// Upload and send file.
-  ///
-  /// Return a bool showing whether the upload and send is successful or not.
-  Future<bool> _uploadAndSendFile(
-      String contentType,
-      String filename,
-      // File file,
-      Uint8List fileBytes,
-      ChatMsgM chatMsgM,
-      void Function(double progress)? progress) async {
-    // Prepare
-    final prepareReq =
-        FilePrepareRequest(contentType: contentType, filename: filename);
-    String fileId;
-
-    try {
-      final resourceApi = ResourceApi();
-      fileId = (await resourceApi.prepareFile(prepareReq)).data!;
-    } catch (e) {
-      App.logger.severe(e);
-      App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-      return false;
-    }
-
-    // Upload
-    // final fileBytes = await file.readAsBytes();
-    final fileUploader = FileUploader(
-        fileBytes: fileBytes, fileId: fileId, onUploadProgress: progress);
-
-    FileUploadResponse uploadRes;
-    try {
-      uploadRes = (await fileUploader.upload(contentType))!.data!;
-    } catch (e) {
-      App.logger.severe(e);
-      App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-
-      return false;
-    }
-
-    // Send
-    Response<int> res;
-
-    try {
-      if (chatMsgM.isGroupMsg) {
-        final groupApi = GroupApi();
-        res = await groupApi.sendFileMsg(
-            chatMsgM.gid, chatMsgM.localMid, uploadRes.path,
-            width: chatMsgM.msgNormal?.properties?["width"],
-            height: chatMsgM.msgNormal?.properties?["height"]);
-      } else {
-        final userApi = UserApi();
-        res = await userApi.sendFileMsg(
-            chatMsgM.dmUid, chatMsgM.localMid, uploadRes.path,
-            width: chatMsgM.msgNormal?.properties?["width"],
-            height: chatMsgM.msgNormal?.properties?["height"]);
-      }
-
-      if (res.statusCode == 200 && res.data != null) {
-        final mid = res.data!;
-        chatMsgM.mid = mid;
-        chatMsgM.status = MsgStatus.success;
-        await ChatMsgDao().add(chatMsgM).then((chatMsgM) async {
-          App.app.chatService
-              .fireMsg(chatMsgM..status = MsgStatus.success, true);
-        });
-        return true;
-      } else {
-        App.logger.severe(res.statusCode);
-        App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-        return false;
-      }
-    } catch (e) {
-      App.logger.severe(e);
-      App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-      return false;
-    }
-  }
-
-  /// Upload and send audio file.
-  ///
-  /// Return a bool showing whether the upload and send is successful or not.
-  Future<bool> _uploadAndSendAudio(
-      String contentType,
-      String filename,
-      // File file,
-      Uint8List fileBytes,
-      ChatMsgM chatMsgM,
-      void Function(double progress)? progress) async {
-    // Prepare
-    final prepareReq =
-        FilePrepareRequest(contentType: contentType, filename: filename);
-    String fileId;
-
-    try {
-      final resourceApi = ResourceApi();
-      fileId = (await resourceApi.prepareFile(prepareReq)).data!;
-    } catch (e) {
-      App.logger.severe(e);
-      App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-      return false;
-    }
-
-    // Upload
-    // final fileBytes = await file.readAsBytes();
-    final fileUploader = FileUploader(
-        fileBytes: fileBytes, fileId: fileId, onUploadProgress: progress);
-
-    FileUploadResponse uploadRes;
-    try {
-      uploadRes = (await fileUploader.upload(contentType))!.data!;
-    } catch (e) {
-      App.logger.severe(e);
-      App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-      return false;
-    }
-
-    // Send
-    Response<int> res;
-
-    try {
-      if (chatMsgM.isGroupMsg) {
-        final groupApi = GroupApi();
-        res = await groupApi.sendAudioMsg(
-            chatMsgM.gid, chatMsgM.localMid, uploadRes.path);
-      } else {
-        final userApi = UserApi();
-        res = await userApi.sendAudioMsg(
-            chatMsgM.dmUid, chatMsgM.localMid, uploadRes.path);
-      }
-
-      if (res.statusCode == 200 && res.data != null) {
-        final mid = res.data!;
-        chatMsgM.mid = mid;
-        chatMsgM.status = MsgStatus.success;
-        await ChatMsgDao().add(chatMsgM).then((chatMsgM) async {
-          App.app.chatService
-              .fireMsg(chatMsgM..status = MsgStatus.success, true);
-        });
-        return true;
-      } else {
-        App.logger.severe(res.statusCode);
-        App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
-        return false;
-      }
-    } catch (e) {
-      App.logger.severe(e);
       App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
       return false;
     }
@@ -1111,17 +861,12 @@ class VoceSendService {
     // Fire status to UI message list, but only change db after server responses.
     App.app.chatService.fireMsg(targetMsgM..status = MsgStatus.sending, true);
 
-    // Send to server.
-    MessageApi api = MessageApi();
     try {
-      await api.edit(targetMid, content).then((response) async {
-        if (response.statusCode == 200) {
-          // Do nothing, edits and reactions purly depend on SSE events.
-        } else {
-          App.logger.severe(response.statusCode);
-          App.app.chatService.fireMsg(targetMsgM, true);
-        }
-      });
+      await _sendV2Operation(
+        targetMsgM,
+        3,
+        {'target_mid': targetMid, 'content': content},
+      );
     } catch (e) {
       App.logger.severe(e);
       App.app.chatService.fireMsg(targetMsgM, true);
@@ -1133,12 +878,12 @@ class VoceSendService {
     bool succeed = false;
 
     try {
-      final messageApi = MessageApi();
-      await messageApi.react(targetMsgM.mid, reaction).then((response) {
-        if (response.statusCode == 200) {
-          succeed = true;
-        } else {}
-      });
+      await _sendV2Operation(
+        targetMsgM,
+        4,
+        {'target_mid': targetMsgM.mid, 'action': reaction},
+      );
+      succeed = true;
     } catch (e) {
       App.logger.severe(e);
     }
@@ -1153,6 +898,52 @@ class VoceSendService {
       return false;
     }
   }
+
+  Future<int> _sendV2Operation(
+      ChatMsgM target, int kind, Map<String, dynamic> operation) async {
+    final myUid = App.app.userDb!.uid;
+    final body = Uint8List.fromList(utf8.encode(jsonEncode(operation)));
+    if (target.isGroupMsg) {
+      final group = await GroupInfoDao().getGroupByGid(target.gid);
+      final info = group == null
+          ? <String, dynamic>{}
+          : Map<String, dynamic>.from(jsonDecode(group.info) as Map);
+      final members = await _channelMemberUids(group, info);
+      return (await _mlsChannelService(myUid)).sendApplication(
+        target.gid,
+        kind,
+        body,
+        <int>{myUid, ...members},
+      );
+    }
+    final api = E2eApi(App.app.chatServerM.fullUrl);
+    final bundles = await _collectV2Bundles(api, [myUid, target.dmUid]);
+    final encrypted = await E2eV2Dm.encryptText(
+      uid: myUid,
+      peerUid: target.dmUid,
+      plaintext: '',
+      bundles: bundles,
+      kind: kind,
+      body: body,
+      mime: 'application/json',
+    );
+    if (encrypted == null) throw StateError('recipient has no E2EE v2 device');
+    final response = await UserApi().sendE2eV2Msg(
+      target.dmUid,
+      encrypted.content,
+      encrypted.properties,
+    );
+    if (response.statusCode != 200 || response.data == null) {
+      throw StateError('encrypted operation send failed');
+    }
+    return response.data!;
+  }
+
+  Future<int> sendDelete(ChatMsgM target) => _sendV2Operation(
+        target,
+        9,
+        {'target_mid': target.mid},
+      );
 
   Future<int> _getFakeMid() async {
     // return -1;

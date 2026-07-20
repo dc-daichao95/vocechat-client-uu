@@ -8,6 +8,7 @@ import 'package:vocechat_client/api/models/group/group_create_response.dart';
 import 'package:vocechat_client/api/models/group/group_update_request.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/app_consts.dart';
+import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 
 class GroupApi {
   late final String _baseUrl;
@@ -128,37 +129,35 @@ class GroupApi {
     return newRes;
   }
 
-  Future<Response<int>> sendE2eMsg(
-      int gid, String msg, Map<String, dynamic>? properties) async {
+  Future<Response<int>> sendE2eV2Msg(
+    int gid,
+    String ciphertextBase64,
+    E2eV2RoutingProperties properties,
+  ) async {
     final dio = DioUtil.token(baseUrl: _baseUrl);
-    dio.options.headers["x-properties"] =
-        base64.encode(utf8.encode(json.encode(properties)));
-    dio.options.headers["content-type"] = typeE2e;
-    dio.options.receiveTimeout = Duration(milliseconds: 10000);
-
-    Map<String, dynamic> refererHeader = {
-      'referer': App.app.chatServerM.fullUrl
-    };
-    if (App.app.chatServerM.url == "dev.voce.chat") {
-      refererHeader = {'referer': "https://privoce.voce.chat"};
+    final headers = Map<String, dynamic>.from(dio.options.headers)
+      ..['x-properties'] = encodeE2eV2Properties(properties)
+      ..['content-type'] = typeE2eV2;
+    if (App.app.chatServerM.url == 'dev.voce.chat') {
+      headers['referer'] = 'https://privoce.voce.chat';
+    } else {
+      headers['referer'] = App.app.chatServerM.fullUrl;
     }
-    dio.options.headers.addAll(refererHeader);
 
     final res = await dio.post(
-      "/$gid/send",
-      data: msg,
-      options: Options(contentType: typeE2e, headers: Map<String, dynamic>.from(dio.options.headers)),
+      '/$gid/send',
+      data: ciphertextBase64,
+      options: Options(contentType: typeE2eV2, headers: headers),
     );
-
-    var newRes = Response<int>(
-        headers: res.headers,
-        requestOptions: res.requestOptions,
-        isRedirect: res.isRedirect,
-        statusCode: res.statusCode,
-        statusMessage: res.statusMessage,
-        redirects: res.redirects,
-        extra: res.extra);
-
+    final newRes = Response<int>(
+      headers: res.headers,
+      requestOptions: res.requestOptions,
+      isRedirect: res.isRedirect,
+      statusCode: res.statusCode,
+      statusMessage: res.statusMessage,
+      redirects: res.redirects,
+      extra: res.extra,
+    );
     if (res.statusCode == 200 && res.data != null) {
       newRes.data = res.data as int;
     }

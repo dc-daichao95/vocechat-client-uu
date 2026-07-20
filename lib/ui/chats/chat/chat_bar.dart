@@ -65,44 +65,44 @@ class _ChatBarState extends State<ChatBar> {
         leading: widget.hideBack
             ? const SizedBox(width: 16)
             : CupertinoButton(
-            padding: EdgeInsets.only(left: 16, right: 4),
-            onPressed: () {
-              widget.onPop();
-            },
-            child: SizedBox(
-              width: 74,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.arrow_back_ios_new, color: AppColors.grey97),
-                  if (widget.unreadCount != null)
-                    Flexible(
-                      child: ValueListenableBuilder<int>(
-                          valueListenable: widget.unreadCount!,
-                          builder: (context, unreadCount, _) {
-                            if (unreadCount < 1) {
-                              return SizedBox.shrink();
-                            }
-                            String text = unreadCount.toString();
-                            if (unreadCount > 99) {
-                              text = "99+";
-                            }
+                padding: EdgeInsets.only(left: 16, right: 4),
+                onPressed: () {
+                  widget.onPop();
+                },
+                child: SizedBox(
+                  width: 74,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.arrow_back_ios_new, color: AppColors.grey97),
+                      if (widget.unreadCount != null)
+                        Flexible(
+                          child: ValueListenableBuilder<int>(
+                              valueListenable: widget.unreadCount!,
+                              builder: (context, unreadCount, _) {
+                                if (unreadCount < 1) {
+                                  return SizedBox.shrink();
+                                }
+                                String text = unreadCount.toString();
+                                if (unreadCount > 99) {
+                                  text = "99+";
+                                }
 
-                            return Text(
-                              text,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                  color: AppColors.grey500,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 17),
-                            );
-                          }),
-                    )
-                ],
-              ),
-            )),
+                                return Text(
+                                  text,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: AppColors.grey500,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 17),
+                                );
+                              }),
+                        )
+                    ],
+                  ),
+                )),
         title: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: () async {

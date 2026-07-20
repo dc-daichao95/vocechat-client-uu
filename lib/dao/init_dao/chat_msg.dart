@@ -154,7 +154,7 @@ class ChatMsgM extends Equatable with M {
   bool get isE2ePendingMsg {
     try {
       final map = json.decode(detail) as Map;
-      if (map["content_type"] == typeE2e) return true;
+      if (map["content_type"] == typeE2eV2) return true;
       final props = map["properties"];
       return props is Map &&
           props["e2e_decrypt_failed"] == true &&
@@ -293,8 +293,8 @@ class ChatMsgM extends Equatable with M {
         return MsgContentType.archive;
       case typeAudio:
         return MsgContentType.audio;
-      case typeE2e:
-        // Undecrypted legacy rows; prefer text placeholder rendering.
+      case typeE2eV2:
+        // Undecrypted generation-2 rows render a precise encrypted placeholder.
         return MsgContentType.text;
       default:
         return null;
