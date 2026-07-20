@@ -665,9 +665,25 @@ class _VoceChatPageState extends State<VoceChatPage>
     midList.add(chatMsgM.mid);
     try {
       final savedApi = SavedApi();
-      await savedApi.createSaved(midList);
+      final res = await savedApi.createSaved(midList);
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(AppLocalizations.of(context)!.toolsSaved)),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text(
+                  'Save failed (${res.statusCode})')),
+        );
+      }
     } catch (e) {
       App.logger.severe(e);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Save failed: $e')),
+      );
     }
   }
 
@@ -760,12 +776,24 @@ class _VoceChatPageState extends State<VoceChatPage>
       return;
     }
     try {
-      for (var mid in midList) {
-        final savedApi = SavedApi();
-        savedApi.createSaved([mid]);
+      final savedApi = SavedApi();
+      final res = await savedApi.createSaved(midList);
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(AppLocalizations.of(context)!.toolsSaved)),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Save failed (${res.statusCode})')),
+        );
       }
     } catch (e) {
       App.logger.severe(e);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Save failed: $e')),
+      );
     }
 
     selectedMsgMap.clear();

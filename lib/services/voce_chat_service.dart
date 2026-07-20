@@ -43,6 +43,7 @@ import 'package:vocechat_client/services/e2e_v2_identity.dart';
 import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 import 'package:vocechat_client/services/mls_channel_service.dart';
 import 'package:vocechat_client/services/mls_state_store.dart';
+import 'package:vocechat_client/services/voce_send_service.dart';
 import 'package:vocechat_client/services/persistent_connection/dio_sse.dart';
 import 'package:vocechat_client/services/persistent_connection/persistent_connection.dart';
 import 'package:vocechat_client/services/persistent_connection/sse.dart';
@@ -1778,9 +1779,15 @@ class VoceChatService {
       detail['content'] = utf8.decode(body);
     } else if (kind == 2) {
       final operation = jsonDecode(utf8.decode(body)) as Map;
-      properties['reply_mid'] = (operation['target_mid'] as num).toInt();
+      final targetMid = (operation['target_mid'] as num).toInt();
+      final replyContent = operation['content'] as String? ?? '';
+      // Wire replies arrive as DR application events; materialize a real reply
+      // bubble (type=reply + mid) so UI does not show the decrypt placeholder.
+      detail['type'] = 'reply';
+      detail['mid'] = targetMid;
       detail['content_type'] = typeText;
-      detail['content'] = operation['content'] as String;
+      detail['content'] = replyContent;
+      properties['reply_mid'] = targetMid;
     } else if (kind == 3) {
       final operation = jsonDecode(utf8.decode(body)) as Map;
       final targetMid = (operation['target_mid'] as num).toInt();
@@ -1900,6 +1907,8 @@ class VoceChatService {
         final envelope = detail['content'] as String? ?? '';
         final event = await E2eV2Dm.decryptApplication(
           uid: myUid,
+          // DR session is keyed by message sender (from_uid), including
+          // linked-device sync copies where from_uid === me.
           peerUid: chatMsgM.fromUid,
           content: envelope,
           localId: properties['local_id'] ?? properties['cid'],
@@ -1908,7 +1917,9 @@ class VoceChatService {
         await _applyV2Application(detail, event.kind, event.body);
         chatMsgM.detail = json.encode(detail);
         await ChatMsgDao().update(chatMsgM);
-        fireMsg(chatMsgM, true, snippetOnly: true);
+        // Must not use snippetOnly — ChatPageController ignores snippet-only
+        // events, which left the decrypt placeholder on screen after success.
+        fireMsg(chatMsgM, true, snippetOnly: false);
         return;
       }
     } catch (e) {
@@ -2233,25 +2244,63 @@ class VoceChatService {
 
   Future<bool> sendForward(
       List<int> midList, List<int> uidList, List<int> gidList) async {
-    String archiveId;
+    if (midList.isEmpty || (uidList.isEmpty && gidList.isEmpty)) {
+      return false;
+    }
+
+    // Gen-2 E2E messages cannot be re-shared via server archive ciphertext.
+    // Re-send local plaintext (already decrypted on this device) as new E2E msgs.
+    final e2ePlain = <ChatMsgM>[];
+    final archiveMids = <int>[];
+    for (final mid in midList) {
+      final msg = await ChatMsgDao().getMsgByMid(mid);
+      if (msg != null &&
+          msg.isE2eMarkedMsg &&
+          (msg.isTextMsg || msg.isMarkdownMsg || msg.isReplyMsg)) {
+        e2ePlain.add(msg);
+      } else if (msg != null) {
+        archiveMids.add(mid);
+      }
+    }
+
     try {
-      final resourceApi = ResourceApi();
-      archiveId = (await resourceApi.archive(midList)).data!;
+      for (final msg in e2ePlain) {
+        final content = msg.msgNormal?.content ??
+            msg.msgReply?.content ??
+            '';
+        if (content.isEmpty) continue;
+        for (final uid in uidList) {
+          await VoceSendService().sendUserText(uid, content);
+        }
+        for (final gid in gidList) {
+          await VoceSendService().sendChannelText(gid, content);
+        }
+      }
     } catch (e) {
       App.logger.severe(e);
       return false;
     }
 
+    if (archiveMids.isEmpty) {
+      return e2ePlain.isNotEmpty;
+    }
+
+    String archiveId;
     try {
-      // send archive msg.
+      final resourceApi = ResourceApi();
+      archiveId = (await resourceApi.archive(archiveMids)).data!;
+    } catch (e) {
+      App.logger.severe(e);
+      return e2ePlain.isNotEmpty;
+    }
+
+    try {
       final localMid = uuid();
 
       for (final uid in uidList) {
         try {
           final userApi = UserApi();
-          await userApi
-              .sendArchiveMsg(uid, localMid, archiveId)
-              .then((value) {});
+          await userApi.sendArchiveMsg(uid, localMid, archiveId);
         } catch (e) {
           App.logger.severe(e);
           return false;
@@ -2261,9 +2310,7 @@ class VoceChatService {
       for (final gid in gidList) {
         try {
           final groupApi = GroupApi();
-          await groupApi
-              .sendArchiveMsg(gid, localMid, archiveId)
-              .then((value) {});
+          await groupApi.sendArchiveMsg(gid, localMid, archiveId);
         } catch (e) {
           App.logger.severe(e);
           return false;

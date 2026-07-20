@@ -5,6 +5,7 @@ import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import 'package:vocechat_client/api/models/msg/msg_archive/archive_msg.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/app_consts.dart';
+import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
 import 'package:vocechat_client/services/file_handler.dart';
 import 'package:vocechat_client/ui/chats/chat/message_tile/file_bubble.dart';
 import 'package:vocechat_client/ui/chats/chat/message_tile/image_bubble/image_bubble.dart';
@@ -21,6 +22,17 @@ class SavedContentBubble extends StatelessWidget {
   /// Saved text plain messages do not include replies. Only normal msgs.
   /// Saved msgs do not include [edited] info.
   SavedContentBubble(this.archiveId, this.archiveMsg, this.getSavedFiles);
+
+  Future<String?> _localE2ePlaintext() async {
+    try {
+      final local = await ChatMsgDao().getMsgByMid(archiveMsg.mid);
+      if (local == null) return null;
+      if (local.isE2ePendingMsg) return null;
+      return local.msgNormal?.content ?? local.msgReply?.content;
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -39,6 +51,26 @@ class SavedContentBubble extends StatelessWidget {
             markdownText:
                 archiveMsg.content ?? AppLocalizations.of(context)!.noContent,
             edited: false);
+      case typeE2eV2:
+        // Favorites store opaque E2E envelopes; prefer already-decrypted local mid.
+        return FutureBuilder<String?>(
+          future: _localE2ePlaintext(),
+          builder: (context, snapshot) {
+            final text = snapshot.data;
+            if (text != null && text.isNotEmpty) {
+              return TextBubble(
+                  content: text,
+                  edited: false,
+                  hasMention: true,
+                  enableShowMoreBtn: true,
+                  maxLines: 10);
+            }
+            return TextBubble(
+                content: '[Encrypted message]',
+                edited: false,
+                hasMention: false);
+          },
+        );
       case typeFile:
         if (archiveMsg.isImageMsg) {
           // Only show thumb in chat list.

@@ -283,7 +283,7 @@ class VoceSendService {
     final chatMsgDao = ChatMsgDao();
 
     final detail = MsgReply(
-        properties: {"cid": localMid},
+        properties: {"cid": localMid, "e2e": true, "e2e_version": 2},
         contentType: typeText,
         expiresIn: expiresIn,
         mid: targetMid,
@@ -297,7 +297,7 @@ class VoceSendService {
     ChatMsgM chatMsgM = ChatMsgM.fromReply(message, localMid, MsgStatus.fail);
 
     await chatMsgDao.addOrUpdate(chatMsgM).then((_) async {
-      final toBeFired = ChatMsgM.fromMsg(message, localMid, MsgStatus.sending);
+      final toBeFired = ChatMsgM.fromReply(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
       try {
@@ -305,6 +305,7 @@ class VoceSendService {
           chatMsgM,
           2,
           {'target_mid': targetMid, 'content': content},
+          localId: localMid,
         );
         message.mid = mid;
         chatMsgM = ChatMsgM.fromReply(message, localMid, MsgStatus.success);
@@ -346,9 +347,14 @@ class VoceSendService {
     final chatId = SharedFuncs.getChatId(uid: uid)!;
     final fileBytes = await file.readAsBytes();
     if (isImage) {
-      final decodedImage = await decodeImageFromList(await file.readAsBytes());
-      properties
-          .addAll({'height': decodedImage.height, 'width': decodedImage.width});
+      try {
+        final decodedImage = await decodeImageFromList(fileBytes);
+        properties.addAll(
+            {'height': decodedImage.height, 'width': decodedImage.width});
+      } catch (e) {
+        // HEIC / exotic formats may fail decode on Android — still send bytes.
+        App.logger.warning('image decode failed, sending without size: $e');
+      }
 
       // Save image to local storage first. The [ChatPageController] will have
       // an image file to prepare for [tileData].
@@ -360,9 +366,19 @@ class VoceSendService {
         await FileHandler.singleton
             .saveImageNormal(chatId, fileBytes, localMid, filename);
       } else {
-        // TODO: change to save File instead of bytes.
-        final thumbBytes =
-            await FlutterImageCompress.compressWithList(fileBytes, quality: 25);
+        // flutter_image_compress has no Windows/Linux plugin — never block send.
+        Uint8List thumbBytes = fileBytes;
+        try {
+          if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+            thumbBytes = await FlutterImageCompress.compressWithList(
+              fileBytes,
+              quality: 25,
+              format: CompressFormat.jpeg,
+            );
+          }
+        } catch (e) {
+          App.logger.warning('thumbnail compress failed, using original: $e');
+        }
         await FileHandler.singleton
             .saveImageThumb(chatId, thumbBytes, localMid, filename);
       }
@@ -570,7 +586,13 @@ class VoceSendService {
     final chatMsgDao = ChatMsgDao();
 
     final detail = MsgReply(
-        properties: {"cid": localMid, 'mentions': mentions},
+        properties: {
+          "cid": localMid,
+          'mentions': mentions,
+          'e2e': true,
+          'e2e_version': 2,
+          'protocol': 'mls',
+        },
         contentType: typeText,
         expiresIn: expiresIn,
         mid: targetMid,
@@ -584,7 +606,7 @@ class VoceSendService {
     ChatMsgM chatMsgM = ChatMsgM.fromReply(message, localMid, MsgStatus.fail);
 
     await chatMsgDao.addOrUpdate(chatMsgM).then((_) async {
-      final toBeFired = ChatMsgM.fromMsg(message, localMid, MsgStatus.sending);
+      final toBeFired = ChatMsgM.fromReply(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
       try {
@@ -592,6 +614,7 @@ class VoceSendService {
           chatMsgM,
           2,
           {'target_mid': targetMid, 'content': content},
+          localId: localMid,
         );
         message.mid = mid;
         chatMsgM = ChatMsgM.fromReply(message, localMid, MsgStatus.success);
@@ -633,9 +656,13 @@ class VoceSendService {
     };
 
     if (isImage) {
-      final decodedImage = await decodeImageFromList(await file.readAsBytes());
-      properties
-          .addAll({'height': decodedImage.height, 'width': decodedImage.width});
+      try {
+        final decodedImage = await decodeImageFromList(fileBytes);
+        properties.addAll(
+            {'height': decodedImage.height, 'width': decodedImage.width});
+      } catch (e) {
+        App.logger.warning('image decode failed, sending without size: $e');
+      }
 
       // Save image to local storage first. The [ChatPageController] will have
       // an image file to prepare for [tileData].
@@ -647,9 +674,19 @@ class VoceSendService {
         await FileHandler.singleton
             .saveImageNormal(chatId, fileBytes, localMid, filename);
       } else {
-        // TODO: change to save File instead of bytes.
-        final thumbBytes =
-            await FlutterImageCompress.compressWithList(fileBytes, quality: 25);
+        // flutter_image_compress has no Windows/Linux plugin — never block send.
+        Uint8List thumbBytes = fileBytes;
+        try {
+          if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+            thumbBytes = await FlutterImageCompress.compressWithList(
+              fileBytes,
+              quality: 25,
+              format: CompressFormat.jpeg,
+            );
+          }
+        } catch (e) {
+          App.logger.warning('thumbnail compress failed, using original: $e');
+        }
         await FileHandler.singleton
             .saveImageThumb(chatId, thumbBytes, localMid, filename);
       }
@@ -845,16 +882,29 @@ class VoceSendService {
       }
       chatMsgM.mid = mid;
       chatMsgM.status = MsgStatus.success;
-      await ChatMsgDao().add(chatMsgM).then((message) async {
-        App.app.chatService.fireMsg(message..status = MsgStatus.success, true);
-      });
+      try {
+        final detail = Map<String, dynamic>.from(jsonDecode(chatMsgM.detail));
+        final props = Map<String, dynamic>.from(
+            (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
+        props['e2e'] = true;
+        props['e2e_decrypted'] = true;
+        detail['properties'] = props;
+        chatMsgM.detail = jsonEncode(detail);
+      } catch (_) {}
+      // Optimistic row already inserted by localMid — must update, not add
+      // (SQLite UNIQUE on id/localMid caused Android "Attachment send failed").
+      final updated = await ChatMsgDao().updateMsgByLocalMid(chatMsgM);
+      if (!updated) {
+        await ChatMsgDao().addOrUpdate(chatMsgM);
+      }
+      App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.success, true);
       return true;
-    } catch (e) {
-      App.logger.severe("E2E file encrypt failed: $e");
+    } catch (e, st) {
+      App.logger.severe("Attachment send failed: $e\n$st");
       final ctx = navigatorKey.currentContext;
       if (ctx != null) {
         ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(content: Text('E2E encrypt failed: $e')),
+          SnackBar(content: Text('Attachment send failed: $e')),
         );
       }
       App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
@@ -910,7 +960,8 @@ class VoceSendService {
   }
 
   Future<int> _sendV2Operation(
-      ChatMsgM target, int kind, Map<String, dynamic> operation) async {
+      ChatMsgM target, int kind, Map<String, dynamic> operation,
+      {String? localId}) async {
     final myUid = App.app.userDb!.uid;
     final body = Uint8List.fromList(utf8.encode(jsonEncode(operation)));
     if (target.isGroupMsg) {
@@ -927,19 +978,21 @@ class VoceSendService {
       );
     }
     final api = E2eApi(App.app.chatServerM.fullUrl);
-    final bundles = await _collectV2Bundles(api, [myUid, target.dmUid]);
+    final peerUid = target.dmUid > 0 ? target.dmUid : target.fromUid;
+    final bundles = await _collectV2Bundles(api, [myUid, peerUid]);
     final encrypted = await E2eV2Dm.encryptText(
       uid: myUid,
-      peerUid: target.dmUid,
+      peerUid: peerUid,
       plaintext: '',
       bundles: bundles,
       kind: kind,
       body: body,
       mime: 'application/json',
+      localId: localId ?? target.localMid,
     );
     if (encrypted == null) throw StateError('recipient has no E2EE v2 device');
     final response = await UserApi().sendE2eV2Msg(
-      target.dmUid,
+      peerUid,
       encrypted.content,
       encrypted.properties,
     );
