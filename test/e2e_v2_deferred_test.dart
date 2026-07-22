@@ -296,23 +296,36 @@ void main() {
   });
 
   group('NativeDeferredCryptoEngine (Task 9 FFI integration point)', () {
-    test('fails closed until shared-core Task 3/9 exports deferred_* natively',
+    test(
+        'either fails closed (native lib absent) or succeeds end-to-end '
+        '(native lib present, Task 9) — never silently degrades',
         () async {
       final core = E2eV2Core.instance;
       final loaded = await core.ensureLoaded();
       final engine = NativeDeferredCryptoEngine(core: core);
-      // Whether or not the native lib is present, a not-yet-implemented method
-      // must throw (never silently succeed / fall back to plaintext).
-      expect(
-        () => engine.encrypt(body: Uint8List(0), metadata: const {'id': 'x'}),
-        throwsStateError,
-      );
       if (!loaded) {
+        // No native lib on this run's search path: every method must throw
+        // (never silently succeed / fall back to plaintext).
+        expect(
+          () =>
+              engine.encrypt(body: Uint8List(0), metadata: const {'id': 'x'}),
+          throwsStateError,
+        );
         expect(
           () => engine.metadataCommitment(const {'id': 'x'}),
           throwsStateError,
         );
+        return;
       }
+      // Task 9: native lib is present (voce_e2ee_core rebuilt with the six
+      // deferred_* symbols) — the real engine must now actually work, not
+      // throw. The full round trip (encrypt/wrap/unwrap/decrypt + fail-closed
+      // negative cases) against the real native lib is covered end-to-end by
+      // test/e2e_v2_deferred_native_roundtrip_test.dart; here we just assert
+      // this call site no longer throws "unknown method".
+      final result =
+          engine.encrypt(body: Uint8List(0), metadata: const {'id': 'x'});
+      expect(result.contentKey.length, 32);
     });
   });
 }
