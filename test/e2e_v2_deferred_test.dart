@@ -298,8 +298,7 @@ void main() {
   group('NativeDeferredCryptoEngine (Task 9 FFI integration point)', () {
     test(
         'either fails closed (native lib absent) or succeeds end-to-end '
-        '(native lib present, Task 9) — never silently degrades',
-        () async {
+        '(native lib present, Task 9) — never silently degrades', () async {
       final core = E2eV2Core.instance;
       final loaded = await core.ensureLoaded();
       final engine = NativeDeferredCryptoEngine(core: core);
@@ -307,8 +306,7 @@ void main() {
         // No native lib on this run's search path: every method must throw
         // (never silently succeed / fall back to plaintext).
         expect(
-          () =>
-              engine.encrypt(body: Uint8List(0), metadata: const {'id': 'x'}),
+          () => engine.encrypt(body: Uint8List(0), metadata: const {'id': 'x'}),
           throwsStateError,
         );
         expect(

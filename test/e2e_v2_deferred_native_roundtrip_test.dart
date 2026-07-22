@@ -38,8 +38,7 @@ Future<void> main() async {
     return;
   }
 
-  test('real NativeDeferredCryptoEngine round trip against the native lib',
-      () {
+  test('real NativeDeferredCryptoEngine round trip against the native lib', () {
     _runRealEngineChecks(core);
   });
 }
