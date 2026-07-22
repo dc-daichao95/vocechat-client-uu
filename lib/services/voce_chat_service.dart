@@ -43,6 +43,7 @@ import 'package:vocechat_client/services/e2e_v2_identity.dart';
 import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 import 'package:vocechat_client/services/mls_channel_service.dart';
 import 'package:vocechat_client/services/mls_state_store.dart';
+import 'package:vocechat_client/services/mls_sync_service.dart';
 import 'package:vocechat_client/services/voce_send_service.dart';
 import 'package:vocechat_client/services/persistent_connection/dio_sse.dart';
 import 'package:vocechat_client/services/persistent_connection/persistent_connection.dart';
@@ -519,6 +520,8 @@ class VoceChatService {
           break;
 
         case chatEvent:
+        case e2eIdentityChangedEvent:
+        case e2ePendingEnvelopeAddedEvent:
         case groupChangedEvent:
         case joinedGroupEvent:
         case kickFromGroupEvent:
@@ -557,6 +560,12 @@ class VoceChatService {
       switch (type) {
         case chatEvent:
           await _handleChatMsg(map);
+          break;
+        case e2eIdentityChangedEvent:
+          await _handleE2eIdentityChanged(map);
+          break;
+        case e2ePendingEnvelopeAddedEvent:
+          await _handleE2ePendingEnvelopeAdded(map);
           break;
         case groupChangedEvent:
           await _handleGroupChanged(map);
@@ -892,8 +901,69 @@ class VoceChatService {
       final uid = App.app.userDb?.uid;
       if (uid == null) return;
       await E2eV2Identity.bootstrapAndPublish(uid);
+      // Start MLS sync (cursor persistence + quarantine + one
+      // sequence-conflict retry) as soon as authentication completes,
+      // rather than lazily on first message.
+      unawaited(_ensureMlsSyncService(uid));
     } catch (e) {
       App.logger.warning('E2E identity bootstrap failed: $e');
+    }
+  }
+
+  MlsSyncService? _mlsSyncService;
+  int? _mlsSyncServiceUid;
+
+  /// Lazily builds (and caches) the [MlsSyncService] for [uid]. Called
+  /// eagerly right after authentication (see [_bootstrapE2eIdentity]) and
+  /// reused by [_rewriteMlsV2Record] for every inbound canonical MLS record.
+  Future<MlsSyncService> _ensureMlsSyncService(int uid) async {
+    if (_mlsSyncService != null && _mlsSyncServiceUid == uid) {
+      return _mlsSyncService!;
+    }
+    final deviceId = await E2eV2Identity.deviceId();
+    final channel = MlsChannelService(
+      uid: uid,
+      deviceId: deviceId,
+      delivery: MlsApiDelivery(MlsApi(App.app.chatServerM.fullUrl)),
+      state: MlsStateStore(uid: uid, deviceId: deviceId),
+    );
+    await channel.bootstrap();
+    final sync = MlsSyncService(channel: channel);
+    _mlsSyncService = sync;
+    _mlsSyncServiceUid = uid;
+    return sync;
+  }
+
+  /// `e2e_identity_changed` (uid, device_id, identity_version): a device's
+  /// identity/prekey material changed — sweep any DMs to that uid still
+  /// waiting on a recipient envelope (`sent_waiting_key`) and complete what
+  /// is now possible.
+  Future<void> _handleE2eIdentityChanged(Map<String, dynamic> map) async {
+    try {
+      final uid = (map['uid'] as num?)?.toInt();
+      if (uid == null) return;
+      await VoceSendService().completePendingEnvelopes(uid);
+    } catch (e) {
+      App.logger.warning('e2e_identity_changed handling failed: $e');
+    }
+  }
+
+  /// `e2e_pending_envelope_added` (uid/recipient/device_id/identity_version/
+  /// envelope): a previously `dr-pending` message now has a completed
+  /// envelope for one recipient device. If that recipient is this account,
+  /// retry decrypting any locally-cached pending E2E envelopes (the message
+  /// body was already persisted undecrypted, same as other gen-2 records).
+  Future<void> _handleE2ePendingEnvelopeAdded(Map<String, dynamic> map) async {
+    try {
+      final myUid = App.app.userDb?.uid;
+      if (myUid == null) return;
+      final recipient = (map['recipient'] as num?)?.toInt();
+      final owner = (map['uid'] as num?)?.toInt();
+      if (recipient == myUid || owner == myUid) {
+        unawaited(retryPendingE2eDecrypts());
+      }
+    } catch (e) {
+      App.logger.warning('e2e_pending_envelope_added handling failed: $e');
     }
   }
 
@@ -1729,15 +1799,11 @@ class VoceChatService {
     if (gid == null || uid == null || content is! String) {
       throw const FormatException('invalid MLS chat record');
     }
-    final deviceId = await E2eV2Identity.deviceId();
-    final service = MlsChannelService(
-      uid: uid,
-      deviceId: deviceId,
-      delivery: MlsApiDelivery(MlsApi(App.app.chatServerM.fullUrl)),
-      state: MlsStateStore(uid: uid, deviceId: deviceId),
-    );
-    await service.bootstrap();
-    final message = await service.processGroupRecord(
+    // Malformed records are quarantined by MlsSyncService instead of
+    // throwing here, so one bad/hostile record can never block the rest of
+    // the channel's sync (see mls_sync_service.dart).
+    final sync = await _ensureMlsSyncService(uid);
+    final message = await sync.processIncomingRecord(
       gid: gid,
       mid: chatMsg.mid,
       properties: E2eV2RoutingProperties.fromJson(rawProperties),
@@ -2265,9 +2331,7 @@ class VoceChatService {
 
     try {
       for (final msg in e2ePlain) {
-        final content = msg.msgNormal?.content ??
-            msg.msgReply?.content ??
-            '';
+        final content = msg.msgNormal?.content ?? msg.msgReply?.content ?? '';
         if (content.isEmpty) continue;
         for (final uid in uidList) {
           await VoceSendService().sendUserText(uid, content);

@@ -9,6 +9,21 @@ import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 import 'package:vocechat_client/services/mls_core.dart';
 import 'package:vocechat_client/services/mls_state_store.dart';
 
+/// Thrown when the server rejects a canonical group record because the
+/// sender's epoch/generation is stale (HTTP 409): another device already
+/// advanced the group past the state this ciphertext was encrypted under.
+/// [MlsChannelService.sendApplication] catches this exactly once and retries
+/// after refreshing admission/group state; a second conflict is fatal.
+class MlsSequenceConflictException implements Exception {
+  final String message;
+  const MlsSequenceConflictException([
+    this.message = 'stale MLS epoch/generation (sequence conflict)',
+  ]);
+
+  @override
+  String toString() => 'MlsSequenceConflictException: $message';
+}
+
 abstract class MlsDelivery {
   Future<void> putCredential(String deviceId, Uint8List credential);
   Future<Uint8List> getCredential(int uid, String deviceId);
@@ -74,15 +89,24 @@ class MlsApiDelivery implements MlsDelivery {
     E2eV2RoutingProperties properties,
     Uint8List ciphertext,
   ) async {
-    final response = await groupApi.sendE2eV2Msg(
-      gid,
-      base64Encode(ciphertext),
-      properties,
-    );
-    if (response.statusCode != 200 || response.data == null) {
-      throw StateError('MLS group record send failed: ${response.statusCode}');
+    try {
+      final response = await groupApi.sendE2eV2Msg(
+        gid,
+        base64Encode(ciphertext),
+        properties,
+      );
+      if (response.statusCode != 200 || response.data == null) {
+        throw StateError(
+            'MLS group record send failed: ${response.statusCode}');
+      }
+      return response.data!;
+    } on DioException catch (error) {
+      if (error.response?.statusCode == 409) {
+        throw MlsSequenceConflictException(
+            'group $gid rejected stale epoch/generation');
+      }
+      rethrow;
     }
-    return response.data!;
   }
 
   @override
@@ -303,6 +327,23 @@ class MlsChannelService {
     Map<int, Uint8List> metadata = const {},
   }) async {
     final route = await ensureGroup(gid, memberUids);
+    try {
+      return await _encryptAndSendApplication(route, gid, kind, body, metadata);
+    } on MlsSequenceConflictException {
+      // Exactly one retry: re-run admission (picks up any commit/Welcome the
+      // conflicting response implies we are behind on) before giving up.
+      await _admitAvailableDevices(gid, route, memberUids);
+      return await _encryptAndSendApplication(route, gid, kind, body, metadata);
+    }
+  }
+
+  Future<int> _encryptAndSendApplication(
+    String route,
+    int gid,
+    int kind,
+    Uint8List body,
+    Map<int, Uint8List> metadata,
+  ) async {
     final groupState = await state.readGroupState(route);
     if (groupState == null) throw StateError('MLS group state is missing');
     final sender = ByteData(8)..setUint64(0, uid, Endian.big);

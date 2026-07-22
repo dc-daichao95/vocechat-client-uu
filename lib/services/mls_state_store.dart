@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 abstract class SecureValueStore {
@@ -29,6 +31,7 @@ class MlsStateStore {
   String _cursorKey(String route) => '${_groupKey(route)}:cursor';
   String _generationKey(String route, int epoch) =>
       '${_groupKey(route)}:send-generation:$epoch';
+  String _quarantineKey(String route) => '${_groupKey(route)}:quarantine';
 
   Future<String?> readDeviceState() => _secure.read(_deviceKey);
 
@@ -60,6 +63,38 @@ class MlsStateStore {
     final generation = int.tryParse(await _secure.read(key) ?? '') ?? 0;
     await _secure.write(key, '${generation + 1}');
     return generation;
+  }
+
+  /// Malformed/undecryptable canonical MLS records are quarantined by mid so
+  /// the sync loop never retries the same broken record forever. Cursor
+  /// persistence (above) is left untouched by quarantine: a quarantined
+  /// record simply stops blocking *other* records from being attempted.
+  Future<Set<int>> _readQuarantine(String route) async {
+    final raw = await _secure.read(_quarantineKey(route));
+    if (raw == null || raw.isEmpty) return <int>{};
+    try {
+      return (jsonDecode(raw) as List).map((e) => (e as num).toInt()).toSet();
+    } catch (_) {
+      return <int>{};
+    }
+  }
+
+  Future<void> quarantineRecord(String route, int mid) async {
+    final quarantined = await _readQuarantine(route);
+    quarantined.add(mid);
+    await _secure.write(
+      _quarantineKey(route),
+      jsonEncode(quarantined.toList()),
+    );
+  }
+
+  Future<bool> isQuarantined(String route, int mid) async {
+    return (await _readQuarantine(route)).contains(mid);
+  }
+
+  Future<List<int>> listQuarantined(String route) async {
+    final quarantined = await _readQuarantine(route);
+    return quarantined.toList()..sort();
   }
 }
 

@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-enum E2eV2Protocol { dr, mls }
+enum E2eV2Protocol { dr, drPending, mls }
 
 enum E2eV2WireClass { drEnvelope, mlsHandshake, mlsApplication }
 
@@ -61,6 +61,13 @@ class E2eV2RoutingProperties {
           localId: localId,
         );
       }
+      if (value['protocol'] == 'dr-pending' &&
+          value['wire_class'] == 'dr_envelope') {
+        return E2eV2RoutingProperties.drPending(
+          senderDeviceId: sender,
+          localId: localId,
+        );
+      }
       final epoch = value['mls_epoch'];
       final generation = value['mls_generation'];
       if (value['protocol'] != 'mls' || epoch is! int || generation is! int) {
@@ -110,6 +117,30 @@ class E2eV2RoutingProperties {
       wireClass: E2eV2WireClass.drEnvelope,
       senderDeviceId: senderDeviceId,
       recipientDeviceId: recipientDeviceId,
+      localId: localId,
+      mlsEpoch: null,
+      mlsGeneration: null,
+      handshakeKind: null,
+      commitId: null,
+    );
+  }
+
+  /// `dr-pending`: sender has no recipient bundle yet, so the message is
+  /// encrypted with a deferred content key and sent with no
+  /// `recipient_device_id` (server contract: DM target only). Completed via
+  /// `POST /api/user/e2e/pending/:mid/envelope` once a recipient bundle
+  /// becomes available (see `e2e_v2_deferred.dart`).
+  factory E2eV2RoutingProperties.drPending({
+    required String senderDeviceId,
+    required String localId,
+  }) {
+    _requireNonEmpty(senderDeviceId, 'senderDeviceId');
+    _requireNonEmpty(localId, 'localId');
+    return E2eV2RoutingProperties._(
+      protocol: E2eV2Protocol.drPending,
+      wireClass: E2eV2WireClass.drEnvelope,
+      senderDeviceId: senderDeviceId,
+      recipientDeviceId: null,
       localId: localId,
       mlsEpoch: null,
       mlsGeneration: null,
@@ -180,9 +211,20 @@ class E2eV2RoutingProperties {
     );
   }
 
+  String get _protocolJsonValue {
+    switch (protocol) {
+      case E2eV2Protocol.dr:
+        return 'dr';
+      case E2eV2Protocol.drPending:
+        return 'dr-pending';
+      case E2eV2Protocol.mls:
+        return 'mls';
+    }
+  }
+
   Map<String, Object> toJson() => {
         'e2e_version': 2,
-        'protocol': protocol == E2eV2Protocol.dr ? 'dr' : 'mls',
+        'protocol': _protocolJsonValue,
         'wire_class': wireClass.jsonValue,
         'sender_device_id': senderDeviceId,
         if (recipientDeviceId != null)

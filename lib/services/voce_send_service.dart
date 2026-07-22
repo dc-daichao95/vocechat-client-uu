@@ -26,10 +26,12 @@ import 'package:vocechat_client/api/models/resource/file_prepare_request.dart';
 import 'package:vocechat_client/app.dart';
 import 'package:vocechat_client/app_consts.dart';
 import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
+import 'package:vocechat_client/dao/init_dao/e2e_outbox.dart';
 import 'package:vocechat_client/dao/init_dao/group_info.dart';
 import 'package:vocechat_client/dao/init_dao/user_info.dart';
 import 'package:vocechat_client/dao/init_dao/user_settings.dart';
 import 'package:vocechat_client/models/local_kits.dart';
+import 'package:vocechat_client/models/ui_models/e2e_delivery_state.dart';
 import 'package:vocechat_client/services/file_handler.dart';
 import 'package:vocechat_client/services/file_uploader.dart';
 import 'package:vocechat_client/services/send_task_queue/send_task_queue.dart';
@@ -115,6 +117,11 @@ class VoceSendService {
         <int>[];
   }
 
+  Future<E2eOutboxDao> _outboxDao(int uid) async {
+    final deviceId = await E2eV2Identity.deviceId();
+    return E2eOutboxDao(uid: uid, deviceId: deviceId);
+  }
+
   Future<void> sendUserText(int uid, String content,
       {String? resendLocalMid}) async {
     final fakeMid = await _getFakeMid();
@@ -129,6 +136,7 @@ class VoceSendService {
     Map<String, dynamic> props = {"cid": localMid};
     E2eV2RoutingProperties? v2Route;
     var e2eRequired = false;
+    E2eOutboxDao? outboxDao;
     try {
       final e2eApi = E2eApi(App.app.chatServerM.fullUrl);
       final dm = await e2eApi.getDmSetting(uid);
@@ -136,6 +144,13 @@ class VoceSendService {
       final enabled = dm.data is! Map || dm.data['e2e_enabled'] != false;
       if (enabled) {
         e2eRequired = true;
+        outboxDao = await _outboxDao(myUid);
+        final senderDeviceId = await E2eV2Identity.deviceId();
+        await outboxDao.markEncrypting(
+          localId: localMid,
+          peerUid: uid,
+          senderDeviceId: senderDeviceId,
+        );
 
         // Prefer Double Ratchet when local + peer v2 material is ready.
         try {
@@ -195,6 +210,34 @@ class VoceSendService {
                 };
                 e2eRequired = true;
               }
+            } else {
+              // Peer has never published any usable v2 device key at all —
+              // still end-to-end encrypt via the deferred path rather than
+              // failing the send outright (server contract: `protocol=
+              // dr-pending`). The content key is retained (see
+              // E2eOutboxDao) until a recipient bundle appears and the
+              // envelope is completed.
+              final deferredEnc = await E2eV2Dm.encryptTextDeferred(
+                uid: myUid,
+                plaintext: content,
+                localId: localMid,
+              );
+              if (deferredEnc != null) {
+                wireContent = deferredEnc.content;
+                wireType = typeE2eV2;
+                v2Route = deferredEnc.properties;
+                props = {
+                  ...deferredEnc.properties.toJson(),
+                  "cid": localMid,
+                  "e2e": true,
+                  "e2e_pending": true,
+                };
+                e2eRequired = true;
+                await outboxDao.markSending(
+                  localMid,
+                  contentKeyB64: deferredEnc.contentKeyB64,
+                );
+              }
             }
           }
         } catch (e) {
@@ -206,10 +249,16 @@ class VoceSendService {
             'Peer has no usable E2EE v2 device keys. Open both updated clients once.',
           );
         }
+        if (v2Route.protocol != E2eV2Protocol.drPending) {
+          await outboxDao.markSending(localMid);
+        }
       }
     } catch (e) {
       App.logger.severe("E2E encrypt failed: $e");
       if (e2eRequired) {
+        if (outboxDao != null) {
+          await outboxDao.markFailed(localMid, reason: '$e');
+        }
         final ctx = navigatorKey.currentContext;
         if (ctx != null) {
           ScaffoldMessenger.of(ctx).showSnackBar(
@@ -250,6 +299,13 @@ class VoceSendService {
             final mid = response.data!;
             message.mid = mid;
             chatMsgM = ChatMsgM.fromMsg(message, localMid, MsgStatus.success);
+            if (outboxDao != null) {
+              if (v2Route?.protocol == E2eV2Protocol.drPending) {
+                await outboxDao.markSentWaitingKey(localMid, mid: mid);
+              } else {
+                await outboxDao.markSent(localMid, mid: mid);
+              }
+            }
             await chatMsgDao.update(chatMsgM).then((value) {
               App.app.chatService.fireMsg(chatMsgM, true);
             }).onError((error, stackTrace) {
@@ -260,17 +316,87 @@ class VoceSendService {
           } else {
             App.logger.severe(
                 "Message send failed, statusCode: ${response.statusCode}");
+            if (outboxDao != null) {
+              await outboxDao.markFailed(localMid,
+                  reason: 'http ${response.statusCode}');
+            }
             _notifyE2eRequired(response);
             App.app.chatService
                 .fireMsg(chatMsgM..status = MsgStatus.fail, true);
           }
         },
-      ).onError((error, stackTrace) {
+      ).onError((error, stackTrace) async {
         App.logger.severe(error);
+        if (outboxDao != null) {
+          await outboxDao.markFailed(localMid, reason: '$error');
+        }
         _notifyE2eRequired(error);
         App.app.chatService.fireMsg(chatMsgM..status = MsgStatus.fail, true);
       });
     });
+  }
+
+  /// Sweeps outstanding `sent_waiting_key` DMs to [uid] and completes any
+  /// recipient device envelopes that are now possible, using
+  /// `GET /api/user/e2e/pending/:uid` + `POST /api/user/e2e/pending/:mid/
+  /// envelope` (sender-only, idempotent, identity-version-scoped).
+  ///
+  /// Triggered on `e2e_identity_changed` SSE events (see
+  /// `voce_chat_service.dart`) and safe to call speculatively/repeatedly.
+  Future<void> completePendingEnvelopes(int uid) async {
+    try {
+      final myUid = App.app.userDb?.uid;
+      if (myUid == null) return;
+      final outboxDao = await _outboxDao(myUid);
+      final waiting =
+          await outboxDao.listByState(E2eDeliveryState.sentWaitingKey);
+      final toPeer = waiting.where((entry) => entry.peerUid == uid).toList();
+      if (toPeer.isEmpty) return;
+
+      final e2eApi = E2eApi(App.app.chatServerM.fullUrl);
+      final pendingRes = await e2eApi.getPendingEnvelopes(uid);
+      final pendingMids =
+          pendingRes.statusCode == 200 && pendingRes.data is List
+              ? (pendingRes.data as List).map((e) => (e as num).toInt()).toSet()
+              : <int>{};
+
+      for (final entry in toPeer) {
+        if (entry.mid < 0 || !pendingMids.contains(entry.mid)) continue;
+        final contentKeyB64 = entry.contentKeyB64;
+        if (contentKeyB64 == null) continue;
+
+        final identities = await e2eApi.getIdentity(uid);
+        if (identities.statusCode != 200 || identities.data is! List) continue;
+        for (final row in identities.data as List) {
+          if (row is! Map || row['device_id'] == null) continue;
+          final deviceId = row['device_id'] as String;
+          try {
+            final bundle = await e2eApi.getBundle(uid, deviceId: deviceId);
+            if (bundle.statusCode != 200 ||
+                bundle.data is! Map ||
+                !E2eV2Dm.peerSupportsV2(bundle.data as Map)) {
+              continue;
+            }
+            final envelope = E2eV2Dm.completeEnvelopeForDevice(
+              contentKeyB64: contentKeyB64,
+              recipientBundle: bundle.data as Map,
+            );
+            await e2eApi.putPendingEnvelope(
+              entry.mid,
+              recipientUid: uid,
+              deviceId: deviceId,
+              envelope: envelope,
+            );
+            await outboxDao.recordEnvelopeCompleted(entry.localId, deviceId);
+          } catch (e) {
+            App.logger.warning(
+                'pending envelope completion failed mid=${entry.mid} device=$deviceId: $e');
+          }
+        }
+      }
+    } catch (e) {
+      App.logger.warning('completePendingEnvelopes failed for uid=$uid: $e');
+    }
   }
 
   Future<void> sendUserReply(int uid, int targetMid, String content,
@@ -297,7 +423,8 @@ class VoceSendService {
     ChatMsgM chatMsgM = ChatMsgM.fromReply(message, localMid, MsgStatus.fail);
 
     await chatMsgDao.addOrUpdate(chatMsgM).then((_) async {
-      final toBeFired = ChatMsgM.fromReply(message, localMid, MsgStatus.sending);
+      final toBeFired =
+          ChatMsgM.fromReply(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
       try {
@@ -606,7 +733,8 @@ class VoceSendService {
     ChatMsgM chatMsgM = ChatMsgM.fromReply(message, localMid, MsgStatus.fail);
 
     await chatMsgDao.addOrUpdate(chatMsgM).then((_) async {
-      final toBeFired = ChatMsgM.fromReply(message, localMid, MsgStatus.sending);
+      final toBeFired =
+          ChatMsgM.fromReply(message, localMid, MsgStatus.sending);
       App.app.chatService.fireMsg(toBeFired, true);
 
       try {

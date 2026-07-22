@@ -23,6 +23,37 @@ void main() {
     });
   });
 
+  test('encodes a dr-pending routing header with no recipient_device_id', () {
+    final route = E2eV2RoutingProperties.drPending(
+      senderDeviceId: 'device-a',
+      localId: 'local-dm-pending-1',
+    );
+    final decoded = jsonDecode(
+      utf8.decode(base64Decode(encodeE2eV2Properties(route))),
+    );
+    expect(decoded, {
+      'e2e_version': 2,
+      'protocol': 'dr-pending',
+      'wire_class': 'dr_envelope',
+      'sender_device_id': 'device-a',
+      'local_id': 'local-dm-pending-1',
+    });
+    expect(decoded.containsKey('recipient_device_id'), isFalse);
+  });
+
+  test('round-trips a dr-pending route through fromJson', () {
+    final route = E2eV2RoutingProperties.drPending(
+      senderDeviceId: 'device-a',
+      localId: 'local-dm-pending-2',
+    );
+    final parsed = E2eV2RoutingProperties.fromJson(route.toJson());
+    expect(parsed.protocol, E2eV2Protocol.drPending);
+    expect(parsed.wireClass, E2eV2WireClass.drEnvelope);
+    expect(parsed.recipientDeviceId, isNull);
+    expect(parsed.senderDeviceId, 'device-a');
+    expect(parsed.localId, 'local-dm-pending-2');
+  });
+
   test('encodes an MLS application route with epoch and generation', () {
     final route = E2eV2RoutingProperties.mls(
       wireClass: E2eV2WireClass.mlsApplication,

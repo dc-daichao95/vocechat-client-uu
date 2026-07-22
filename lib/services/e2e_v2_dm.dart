@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:vocechat_client/services/e2e_v2_core.dart';
+import 'package:vocechat_client/services/e2e_v2_deferred.dart';
 import 'package:vocechat_client/services/e2e_v2_identity.dart';
 import 'package:vocechat_client/services/e2ee_v2_wire.dart';
 import 'package:uuid/uuid.dart';
@@ -367,6 +368,159 @@ class E2eV2Dm {
       return env is Map && env['v'] == 2 && env['alg'] == 'DR+AES-GCM';
     } catch (_) {
       return false;
+    }
+  }
+
+  /// True for a `dr-pending` envelope: sender had no usable recipient bundle
+  /// yet and encrypted with a deferred content key (server
+  /// `algorithm=DEFERRED+AES-GCM`, wire class `dr_envelope`).
+  static bool isDrPendingEnvelope(String content) {
+    try {
+      final env = jsonDecode(utf8.decode(base64Decode(content)));
+      return env is Map && env['v'] == 2 && env['alg'] == 'DEFERRED+AES-GCM';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Sender side of the deferred-DM path (server contract: `protocol=
+  /// dr-pending`, `algorithm=DEFERRED+AES-GCM`, wire class `dr_envelope`, DM
+  /// target only, no `recipient_device_id`).
+  ///
+  /// Used when the peer currently has no usable E2EE v2 device key at all
+  /// (never fetched/rotated) — the message is still end-to-end encrypted
+  /// (content key never leaves the device), it just cannot be wrapped for a
+  /// specific recipient device until one is published. Returns the wire
+  /// content/properties plus the base64 content key the caller's outbox
+  /// (see `E2eOutboxDao`) must retain until every recipient device has a
+  /// completed envelope.
+  static Future<
+      ({
+        String content,
+        E2eV2RoutingProperties properties,
+        String contentKeyB64
+      })?> encryptTextDeferred({
+    required int uid,
+    required String plaintext,
+    required String localId,
+    String mime = 'text/plain',
+    int? kind,
+    Uint8List? body,
+    E2eV2Deferred? deferred,
+  }) async {
+    final local = await _loadLocal(uid);
+    if (local == null) return null;
+    final core = local['core'] as E2eV2Core;
+    final deviceId = local['deviceId'] as String;
+    final eventKind = kind ?? (mime == 'text/markdown' ? 8 : 1);
+    final eventBody = body ?? Uint8List.fromList(utf8.encode(plaintext));
+    final encoded = core.call('mls_application_encode', {
+      'kind': eventKind,
+      'body_b64': base64Encode(eventBody),
+      'metadata': {'1': base64Encode(utf8.encode(mime))},
+    });
+    final plaintextBytes =
+        base64Decode(encoded['result']['plaintext_b64'] as String);
+
+    final engine = deferred ?? E2eV2Deferred();
+    // Metadata is bound as AAD by the deferred_encrypt contract; binding the
+    // sender device id here means a wrapped envelope can never be replayed
+    // as if it came from a different device.
+    final pending = engine.encryptPending(
+      body: plaintextBytes,
+      metadata: Uint8List.fromList(utf8.encode(deviceId)),
+    );
+
+    await _secure.write(
+      key: _plainKey(deviceId, localId),
+      value: jsonEncode({
+        'kind': eventKind,
+        'body_b64': base64Encode(eventBody),
+        'metadata': {'1': base64Encode(utf8.encode(mime))},
+      }),
+    );
+
+    final envelope = <String, dynamic>{
+      'v': 2,
+      'sender_device_id': deviceId,
+      'alg': 'DEFERRED+AES-GCM',
+      'nonce_b64': pending['nonce_b64'],
+      'ciphertext_b64': pending['ciphertext_b64'],
+      'sha256_b64': pending['sha256_b64'],
+    };
+    final packed = base64Encode(utf8.encode(jsonEncode(envelope)));
+    return (
+      content: packed,
+      properties: E2eV2RoutingProperties.drPending(
+        senderDeviceId: deviceId,
+        localId: localId,
+      ),
+      contentKeyB64: pending['content_key_b64']!,
+    );
+  }
+
+  /// Wraps a retained content key for one newly-available recipient device.
+  /// The resulting envelope base64 is POSTed by the caller to
+  /// `/api/user/e2e/pending/:mid/envelope`.
+  static String completeEnvelopeForDevice({
+    required String contentKeyB64,
+    required Map recipientBundle,
+    E2eV2Deferred? deferred,
+  }) {
+    final engine = deferred ?? E2eV2Deferred();
+    return engine.wrapKeyForRecipient(
+      contentKeyB64: contentKeyB64,
+      recipientBundle: Map<String, dynamic>.from(recipientBundle),
+    );
+  }
+
+  /// Recipient side: once a completed envelope for *this* device arrives
+  /// (via the `e2e_pending_envelope_added` SSE event), unwrap it and decrypt
+  /// the `dr-pending` envelope [content] originally received for [mid].
+  ///
+  /// *** Task 9 integration point (recipient path) ***: the exact shape of
+  /// `local_identity` for `deferred_unwrap_key` is defined by shared-core
+  /// Task 3; this passes device id + local DH/sig secret material, mirroring
+  /// what `dm_session_open_responder` already consumes above. Adjust here if
+  /// Task 3 finalizes a different shape.
+  static Future<({int kind, Uint8List body, Map<int, Uint8List> metadata})?>
+      decryptDrPendingEnvelope({
+    required int uid,
+    required String content,
+    required String wrapEnvelopeB64,
+    E2eV2Deferred? deferred,
+  }) async {
+    final local = await _loadLocal(uid);
+    if (local == null) return null;
+    final core = local['core'] as E2eV2Core;
+    final deviceId = local['deviceId'] as String;
+    final secret = local['secret'] as Map<String, dynamic>;
+
+    Map env;
+    try {
+      env = jsonDecode(utf8.decode(base64Decode(content))) as Map;
+    } catch (_) {
+      return null;
+    }
+    if (env['v'] != 2 || env['alg'] != 'DEFERRED+AES-GCM') return null;
+
+    final engine = deferred ?? E2eV2Deferred();
+    try {
+      final plaintextBytes = engine.unwrapAndDecrypt(
+        envelopeB64: wrapEnvelopeB64,
+        localIdentity: {'device_id': deviceId, ...secret},
+        ciphertextB64: env['ciphertext_b64'] as String,
+        nonceB64: env['nonce_b64'] as String,
+        sha256B64: env['sha256_b64'] as String,
+      );
+      final decoded = core.call('mls_application_decode', {
+        'plaintext_b64': base64Encode(plaintextBytes),
+      });
+      return _decodeCachedApplication(decoded['result'] as Map);
+    } catch (_) {
+      // Fail closed: never fall back to plaintext / a partially-decrypted
+      // body on tamper or a mismatched envelope.
+      return null;
     }
   }
 }

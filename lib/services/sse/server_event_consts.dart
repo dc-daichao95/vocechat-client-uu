@@ -1,4 +1,6 @@
 const chatEvent = "chat";
+const e2eIdentityChangedEvent = "e2e_identity_changed";
+const e2ePendingEnvelopeAddedEvent = "e2e_pending_envelope_added";
 const groupChangedEvent = "group_changed";
 const heartbeatEvent = "heartbeat";
 const keepaliveEvent = "keepalive";

@@ -55,6 +55,27 @@ class E2eApi {
     return _client().get('/identity/$uid');
   }
 
+  /// Lists your sent `mid`s to [uid] that are still missing an envelope for
+  /// some current recipient device (`dr-pending` follow-up).
+  Future<Response> getPendingEnvelopes(int uid) {
+    return _client().get('/pending/$uid');
+  }
+
+  /// Completes a pending envelope for one recipient device. Sender-only,
+  /// idempotent, and identity-version-scoped on the server.
+  Future<Response> putPendingEnvelope(
+    int mid, {
+    required int recipientUid,
+    required String deviceId,
+    required String envelope,
+  }) {
+    return _client().post('/pending/$mid/envelope', data: {
+      'recipient_uid': recipientUid,
+      'device_id': deviceId,
+      'envelope': envelope,
+    });
+  }
+
   Future<Response> putBackup(String blobBase64) => _client().put(
         '/backup',
         data: {'version': 2, 'blob_base64': blobBase64},
