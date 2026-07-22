@@ -13,6 +13,8 @@ import 'package:vocechat_client/ui/app_colors.dart';
 import 'package:vocechat_client/ui/app_text_styles.dart';
 import 'package:vocechat_client/ui/settings/child_pages/firebase_settings_page.dart';
 import 'package:vocechat_client/ui/settings/child_pages/e2e_backup_page.dart';
+import 'package:vocechat_client/ui/settings/child_pages/e2ee_status_page.dart';
+import 'package:vocechat_client/ui/settings/child_pages/bot_e2ee_settings_page.dart';
 import 'package:vocechat_client/ui/settings/child_pages/language_setting_page.dart';
 import 'package:vocechat_client/ui/settings/child_pages/server_info_settings_page.dart';
 import 'package:vocechat_client/ui/settings/child_pages/settings_about_page.dart';
@@ -78,6 +80,24 @@ class _SettingPageState extends State<SettingPage> {
                       MaterialPageRoute(builder: (_) => const E2eBackupPage()),
                     ),
                   ),
+                  BannerTile(
+                    title: AppLocalizations.of(context)!.settingsPageE2eeStatus,
+                    keepTrailingArrow: true,
+                    enableTap: true,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const E2eeStatusPage()),
+                    ),
+                  ),
+                  if (App.app.userDb?.userInfo.isAdmin ?? false)
+                    BannerTile(
+                      title: AppLocalizations.of(context)!.settingsPageBotE2ee,
+                      keepTrailingArrow: true,
+                      enableTap: true,
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                            builder: (_) => const BotE2eeSettingsPage()),
+                      ),
+                    ),
                   _buildAbout(),
                   // if (App.app.userDb?.userInfo.isAdmin ?? false)
                   //   _buildConfigs(context),

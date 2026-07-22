@@ -936,6 +936,23 @@ class VoceChatService {
     return sync;
   }
 
+  /// Task 8 (E2EE status settings page): read-only MLS repair status for one
+  /// channel — the `mid`s that were quarantined (malformed/undecryptable
+  /// records skipped so they can never wedge the sync loop; see
+  /// `MlsSyncService`/`MlsStateStore`). Never mutates anything itself beyond
+  /// the same lazy bootstrap every other MLS-aware call path already does.
+  Future<List<int>> quarantinedMlsRecords(int gid) async {
+    final uid = App.app.userDb?.uid;
+    if (uid == null) return const <int>[];
+    try {
+      final sync = await _ensureMlsSyncService(uid);
+      return await sync.quarantinedRecords(gid);
+    } catch (e) {
+      App.logger.warning('Failed to read MLS quarantine status for $gid: $e');
+      return const <int>[];
+    }
+  }
+
   /// `e2e_identity_changed` (uid, device_id, identity_version): a device's
   /// identity/prekey material changed — sweep any DMs to that uid still
   /// waiting on a recipient envelope (`sent_waiting_key`) and complete what
