@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:vocechat_client/dao/init_dao/e2e_outbox.dart';
 import 'package:vocechat_client/services/e2e_v2_core.dart';
 import 'package:vocechat_client/services/e2e_v2_deferred.dart';
 import 'package:vocechat_client/services/e2e_v2_identity.dart';
@@ -383,6 +384,50 @@ class E2eV2Dm {
     }
   }
 
+  /// Converts a server bundle row (`identity_key_pub`/`signed_prekey_pub`/
+  /// `signed_prekey_sig`/`one_time_prekey`/`device_id`) into the shared-core
+  /// `PreKeyBundle` JSON shape consumed by `deferred_wrap_key`.
+  ///
+  /// [includeOneTimePrekey] defaults to false for the deferred flow: this repo
+  /// does not persist one-time-prekey *secrets* keyed by id, so the recipient
+  /// could not unwrap an OTK-bound envelope. Wrapping against identity +
+  /// signed prekey only keeps `deferred_unwrap_key` reachable with just the
+  /// recipient's `ik_secret_b64`/`spk_secret_b64` (matching the existing
+  /// `dm_session_open_responder` limitation).
+  static Map<String, dynamic>? _toPreKeyBundle(
+    Map bundle, {
+    bool includeOneTimePrekey = false,
+  }) {
+    final identity = _parseIdentityPublic(bundle['identity_key_pub'] as String);
+    if (identity == null) return null;
+    final otk = bundle['one_time_prekey'];
+    return {
+      'identity': identity,
+      'signed_prekey': {
+        'key_id': 1,
+        'dh_pub_b64': bundle['signed_prekey_pub'],
+        'signature_b64': bundle['signed_prekey_sig'],
+      },
+      'one_time_prekey_b64':
+          includeOneTimePrekey && otk is Map ? otk['public_key'] : null,
+      'one_time_prekey_id':
+          includeOneTimePrekey && otk is Map ? otk['key_id'] : null,
+    };
+  }
+
+  /// Packs a structured wrap envelope for transmission (server treats it as
+  /// opaque bytes; delivered back verbatim via `e2e_pending_envelope_added`).
+  static String packWrapEnvelope(Map<String, dynamic> envelope) =>
+      base64Encode(utf8.encode(jsonEncode(envelope)));
+
+  static Map<String, dynamic>? _unpackWrapEnvelope(String transmit) {
+    try {
+      final decoded = jsonDecode(utf8.decode(base64Decode(transmit)));
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    return null;
+  }
+
   /// Sender side of the deferred-DM path (server contract: `protocol=
   /// dr-pending`, `algorithm=DEFERRED+AES-GCM`, wire class `dr_envelope`, DM
   /// target only, no `recipient_device_id`).
@@ -394,6 +439,11 @@ class E2eV2Dm {
   /// content/properties plus the base64 content key the caller's outbox
   /// (see `E2eOutboxDao`) must retain until every recipient device has a
   /// completed envelope.
+  ///
+  /// The transmitted envelope carries the metadata JSON (with a unique
+  /// per-message id) and the commitment digest so the recipient can
+  /// recompute/verify the commitment against the metadata it actually
+  /// receives (see [decryptDrPendingEnvelope]).
   static Future<
       ({
         String content,
@@ -422,13 +472,21 @@ class E2eV2Dm {
     final plaintextBytes =
         base64Decode(encoded['result']['plaintext_b64'] as String);
 
+    // Per-message metadata bound as the AEAD AAD commitment. `id` is a unique
+    // per-message id (the outbox local_id, a UUID v4) so a replayed message
+    // with rewritten metadata fails the commitment check, and duplicates are
+    // detectable on receipt.
+    final metadata = <String, dynamic>{
+      'id': localId,
+      'sender_device_id': deviceId,
+      'mime': mime,
+      'kind': eventKind,
+    };
+
     final engine = deferred ?? E2eV2Deferred();
-    // Metadata is bound as AAD by the deferred_encrypt contract; binding the
-    // sender device id here means a wrapped envelope can never be replayed
-    // as if it came from a different device.
     final pending = engine.encryptPending(
       body: plaintextBytes,
-      metadata: Uint8List.fromList(utf8.encode(deviceId)),
+      metadata: metadata,
     );
 
     await _secure.write(
@@ -447,6 +505,9 @@ class E2eV2Dm {
       'nonce_b64': pending['nonce_b64'],
       'ciphertext_b64': pending['ciphertext_b64'],
       'sha256_b64': pending['sha256_b64'],
+      // Transmit the metadata so the recipient recomputes/verifies the
+      // commitment from what IT received, rather than trusting sha256_b64.
+      'metadata': metadata,
     };
     final packed = base64Encode(utf8.encode(jsonEncode(envelope)));
     return (
@@ -460,41 +521,51 @@ class E2eV2Dm {
   }
 
   /// Wraps a retained content key for one newly-available recipient device.
-  /// The resulting envelope base64 is POSTed by the caller to
-  /// `/api/user/e2e/pending/:mid/envelope`.
-  static String completeEnvelopeForDevice({
+  /// [recipientBundle] is a server bundle row; it is converted to the
+  /// shared-core `PreKeyBundle` shape here. The returned transmit string is
+  /// POSTed to `/api/user/e2e/pending/:mid/envelope`.
+  static String? completeEnvelopeForDevice({
     required String contentKeyB64,
     required Map recipientBundle,
     E2eV2Deferred? deferred,
   }) {
+    final preKeyBundle = _toPreKeyBundle(recipientBundle);
+    if (preKeyBundle == null) return null;
     final engine = deferred ?? E2eV2Deferred();
-    return engine.wrapKeyForRecipient(
+    final envelope = engine.wrapKeyForRecipient(
       contentKeyB64: contentKeyB64,
-      recipientBundle: Map<String, dynamic>.from(recipientBundle),
+      recipientBundle: preKeyBundle,
     );
+    return packWrapEnvelope(envelope);
   }
 
-  /// Recipient side: once a completed envelope for *this* device arrives
-  /// (via the `e2e_pending_envelope_added` SSE event), unwrap it and decrypt
-  /// the `dr-pending` envelope [content] originally received for [mid].
+  /// Recipient side: once a completed wrap envelope for *this* device arrives
+  /// (via the `e2e_pending_envelope_added` SSE event), verify the metadata
+  /// commitment, enforce message-id uniqueness, unwrap the content key, and
+  /// decrypt the `dr-pending` envelope [content].
   ///
-  /// *** Task 9 integration point (recipient path) ***: the exact shape of
-  /// `local_identity` for `deferred_unwrap_key` is defined by shared-core
-  /// Task 3; this passes device id + local DH/sig secret material, mirroring
-  /// what `dm_session_open_responder` already consumes above. Adjust here if
-  /// Task 3 finalizes a different shape.
+  /// [wrapEnvelopeTransmit] is the opaque string delivered by the server
+  /// (produced by [completeEnvelopeForDevice]). [inbox] enforces per-message
+  /// id uniqueness (replay defense); when provided, a previously-accepted id
+  /// is rejected.
+  ///
+  /// *** Task 9 integration point (recipient path) ***: `local_identity` is
+  /// `{ik_secret_b64, spk_secret_b64, otk_secret_b64}` per the finalized
+  /// Task 3 contract. `otk_secret_b64` is null because [completeEnvelopeForDevice]
+  /// wraps without a one-time prekey (see [_toPreKeyBundle]).
   static Future<({int kind, Uint8List body, Map<int, Uint8List> metadata})?>
       decryptDrPendingEnvelope({
     required int uid,
     required String content,
-    required String wrapEnvelopeB64,
+    required String wrapEnvelopeTransmit,
     E2eV2Deferred? deferred,
+    DeferredInboxDao? inbox,
   }) async {
     final local = await _loadLocal(uid);
     if (local == null) return null;
     final core = local['core'] as E2eV2Core;
-    final deviceId = local['deviceId'] as String;
     final secret = local['secret'] as Map<String, dynamic>;
+    final spk = local['spk'] as Map<String, dynamic>;
 
     Map env;
     try {
@@ -503,23 +574,44 @@ class E2eV2Dm {
       return null;
     }
     if (env['v'] != 2 || env['alg'] != 'DEFERRED+AES-GCM') return null;
+    final metadata = env['metadata'];
+    final sha256B64 = env['sha256_b64'];
+    if (metadata is! Map || sha256B64 is! String) return null;
+
+    // Replay defense: reject a message id we have already accepted.
+    final messageId = metadata['id'];
+    if (messageId is String && inbox != null) {
+      if (await inbox.isMessageIdProcessed(messageId)) return null;
+    }
+
+    final wrapEnvelope = _unpackWrapEnvelope(wrapEnvelopeTransmit);
+    if (wrapEnvelope == null) return null;
 
     final engine = deferred ?? E2eV2Deferred();
     try {
-      final plaintextBytes = engine.unwrapAndDecrypt(
-        envelopeB64: wrapEnvelopeB64,
-        localIdentity: {'device_id': deviceId, ...secret},
+      final plaintextBytes = engine.verifyUnwrapAndDecrypt(
+        metadata: Map<String, dynamic>.from(metadata),
+        sha256B64: sha256B64,
+        envelope: wrapEnvelope,
+        localIdentity: {
+          'ik_secret_b64': secret['secret_x25519_b64'],
+          'spk_secret_b64': spk['secret_b64'],
+          'otk_secret_b64': null,
+        },
         ciphertextB64: env['ciphertext_b64'] as String,
         nonceB64: env['nonce_b64'] as String,
-        sha256B64: env['sha256_b64'] as String,
       );
       final decoded = core.call('mls_application_decode', {
         'plaintext_b64': base64Encode(plaintextBytes),
       });
-      return _decodeCachedApplication(decoded['result'] as Map);
+      final result = _decodeCachedApplication(decoded['result'] as Map);
+      if (messageId is String && inbox != null) {
+        await inbox.markMessageIdProcessed(messageId);
+      }
+      return result;
     } catch (_) {
       // Fail closed: never fall back to plaintext / a partially-decrypted
-      // body on tamper or a mismatched envelope.
+      // body on tamper, commitment mismatch, or a wrong-recipient envelope.
       return null;
     }
   }

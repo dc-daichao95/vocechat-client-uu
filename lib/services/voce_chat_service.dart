@@ -23,6 +23,7 @@ import 'package:vocechat_client/dao/init_dao/archive.dart';
 import 'package:vocechat_client/dao/init_dao/chat_msg.dart';
 import 'package:vocechat_client/dao/init_dao/contacts.dart';
 import 'package:vocechat_client/dao/init_dao/dm_info.dart';
+import 'package:vocechat_client/dao/init_dao/e2e_outbox.dart';
 import 'package:vocechat_client/dao/init_dao/group_info.dart';
 import 'package:vocechat_client/dao/init_dao/open_graphic_thumbnail.dart';
 import 'package:vocechat_client/dao/init_dao/properties_models/user_settings/user_settings.dart';
@@ -688,7 +689,8 @@ class VoceChatService {
             final historyProps = chatMsg.detail['properties'];
             final isDrV2 = chatMsg.detail['content_type'] == typeE2eV2 &&
                 historyProps is Map &&
-                historyProps['protocol'] == 'dr';
+                (historyProps['protocol'] == 'dr' ||
+                    historyProps['protocol'] == 'dr-pending');
             if (isDrV2) {
               final detail = chatMsg.detail;
               final content = detail['content'] as String? ?? '';
@@ -948,23 +950,45 @@ class VoceChatService {
     }
   }
 
-  /// `e2e_pending_envelope_added` (uid/recipient/device_id/identity_version/
-  /// envelope): a previously `dr-pending` message now has a completed
-  /// envelope for one recipient device. If that recipient is this account,
-  /// retry decrypting any locally-cached pending E2E envelopes (the message
-  /// body was already persisted undecrypted, same as other gen-2 records).
+  /// `e2e_pending_envelope_added` — server payload keys are exactly
+  /// `{ mid, recipient_uid, device_id, identity_version, envelope }`
+  /// (see server src/api/message.rs, src/api/e2e.rs, src/state.rs). A
+  /// previously `dr-pending` message now has a completed wrap envelope for one
+  /// recipient device. If that recipient device is THIS device, persist the
+  /// wrap envelope keyed by mid and complete the specific pending decrypt
+  /// (not a blind retry of everything).
   Future<void> _handleE2ePendingEnvelopeAdded(Map<String, dynamic> map) async {
     try {
       final myUid = App.app.userDb?.uid;
       if (myUid == null) return;
-      final recipient = (map['recipient'] as num?)?.toInt();
-      final owner = (map['uid'] as num?)?.toInt();
-      if (recipient == myUid || owner == myUid) {
-        unawaited(retryPendingE2eDecrypts());
+      final recipientUid = (map['recipient_uid'] as num?)?.toInt();
+      if (recipientUid != myUid) return;
+      final mid = (map['mid'] as num?)?.toInt();
+      final deviceId = map['device_id'] as String?;
+      final envelope = map['envelope'];
+      if (mid == null || deviceId == null || envelope == null) return;
+
+      final myDevice = await E2eV2Identity.deviceId();
+      // The envelope is wrapped for a specific device; ignore ones addressed
+      // to a different device of this same account.
+      if (deviceId != myDevice) return;
+
+      final inbox = DeferredInboxDao(uid: myUid, deviceId: myDevice);
+      await inbox.putWrapEnvelope(
+          mid, envelope is String ? envelope : jsonEncode(envelope));
+
+      final msg = await ChatMsgDao().getMsgByMid(mid);
+      if (msg != null) {
+        await _decryptPersistedE2e(msg);
       }
     } catch (e) {
       App.logger.warning('e2e_pending_envelope_added handling failed: $e');
     }
+  }
+
+  Future<DeferredInboxDao> _deferredInboxDao(int uid) async {
+    final deviceId = await E2eV2Identity.deviceId();
+    return DeferredInboxDao(uid: uid, deviceId: deviceId);
   }
 
   void deleteMemoryMsgs() {
@@ -1900,6 +1924,11 @@ class VoceChatService {
     final isDrV2 = chatMsg.detail['content_type'] == typeE2eV2 &&
         rawRouting is Map &&
         rawRouting['protocol'] == 'dr';
+    // dr-pending recipients can only decrypt once the wrap envelope arrives
+    // via SSE; the attempt is a no-op until then (see _decryptPersistedE2e).
+    final isDrPendingV2 = chatMsg.detail['content_type'] == typeE2eV2 &&
+        rawRouting is Map &&
+        rawRouting['protocol'] == 'dr-pending';
     final isE2e = chatMsg.detail['content_type'] == typeE2eV2;
 
     // CRITICAL: do NOT await slow E2E decrypt on the SSE event queue.
@@ -1953,7 +1982,7 @@ class VoceChatService {
       await cumulateMsg(chatMsgM);
       await cumulateDmInfo(chatMsgM);
 
-      if (isDrV2) {
+      if (isDrV2 || isDrPendingV2) {
         unawaited(_decryptPersistedE2e(chatMsgM));
       }
     } catch (e) {
@@ -1967,11 +1996,32 @@ class VoceChatService {
     if (myUid == null) return;
     try {
       final detail = Map<String, dynamic>.from(json.decode(chatMsgM.detail));
-      if (detail['content_type'] == typeE2eV2) {
-        final properties = Map<String, dynamic>.from(
-            (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
-        final envelope = detail['content'] as String? ?? '';
-        final event = await E2eV2Dm.decryptApplication(
+      if (detail['content_type'] != typeE2eV2) return;
+      final properties = Map<String, dynamic>.from(
+          (detail['properties'] as Map?)?.cast<String, dynamic>() ?? {});
+      final envelope = detail['content'] as String? ?? '';
+
+      ({int kind, Uint8List body, Map<int, Uint8List> metadata})? event;
+      if (E2eV2Dm.isDrPendingEnvelope(envelope)) {
+        // Recipient-side deferred (`dr-pending`) path: we can only decrypt once
+        // the sender has completed a wrap envelope for THIS device, delivered
+        // via `e2e_pending_envelope_added` and persisted keyed by mid. Until
+        // then, leave the encrypted placeholder in place (no plaintext).
+        if (chatMsgM.mid < 0) return;
+        final inbox = await _deferredInboxDao(myUid);
+        final wrap = await inbox.getWrapEnvelope(chatMsgM.mid);
+        if (wrap == null) return;
+        event = await E2eV2Dm.decryptDrPendingEnvelope(
+          uid: myUid,
+          content: envelope,
+          wrapEnvelopeTransmit: wrap,
+          inbox: inbox,
+        ).timeout(const Duration(seconds: 5));
+        if (event == null) return;
+        // Wrap envelope consumed; free the stored key material.
+        await inbox.deleteWrapEnvelope(chatMsgM.mid);
+      } else {
+        event = await E2eV2Dm.decryptApplication(
           uid: myUid,
           // DR session is keyed by message sender (from_uid), including
           // linked-device sync copies where from_uid === me.
@@ -1980,14 +2030,14 @@ class VoceChatService {
           localId: properties['local_id'] ?? properties['cid'],
         ).timeout(const Duration(seconds: 5));
         if (event == null) return;
-        await _applyV2Application(detail, event.kind, event.body);
-        chatMsgM.detail = json.encode(detail);
-        await ChatMsgDao().update(chatMsgM);
-        // Must not use snippetOnly — ChatPageController ignores snippet-only
-        // events, which left the decrypt placeholder on screen after success.
-        fireMsg(chatMsgM, true, snippetOnly: false);
-        return;
       }
+
+      await _applyV2Application(detail, event.kind, event.body);
+      chatMsgM.detail = json.encode(detail);
+      await ChatMsgDao().update(chatMsgM);
+      // Must not use snippetOnly — ChatPageController ignores snippet-only
+      // events, which left the decrypt placeholder on screen after success.
+      fireMsg(chatMsgM, true, snippetOnly: false);
     } catch (e) {
       App.logger
           .warning('Background E2E decrypt failed mid=${chatMsgM.mid}: $e');

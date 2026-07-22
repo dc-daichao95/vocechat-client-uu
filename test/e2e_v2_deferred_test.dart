@@ -5,66 +5,99 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vocechat_client/services/e2e_v2_core.dart';
 import 'package:vocechat_client/services/e2e_v2_deferred.dart';
 
-/// In-memory stand-in for the shared Rust core's deferred-envelope methods.
-/// Used until shared-core Task 3 lands `deferred_encrypt`/`deferred_wrap_key`/
-/// `deferred_unwrap_key`/`deferred_decrypt` natively (see
-/// [NativeDeferredCryptoEngine] doc comment for the exact Task 9 wiring
-/// point this fake stands in for).
+/// In-memory stand-in for the shared Rust core's deferred-envelope methods,
+/// matching the finalized Task 3 contract shapes (see
+/// `.superpowers/sdd/reports/task-3-report.md` §5/§12). Used until Task 9
+/// rebuilds the native lib with the six `deferred_*` symbols — see
+/// [NativeDeferredCryptoEngine].
 class _FakeDeferredCryptoEngine implements DeferredCryptoEngine {
   final Map<String, Uint8List> _wrappedKeyByRecipient = {};
   bool tamperCiphertextOnDecrypt = false;
 
+  /// Deterministic, order-independent 32-byte commitment over canonical
+  /// metadata (sorted keys, matching the crate's BTreeMap serialization). Not
+  /// a real SHA-256 — this is a test double; the real digest is the native
+  /// core's concern. The only properties tests rely on are determinism,
+  /// key-order independence, and collision-resistance across distinct inputs.
+  static Uint8List _fold32(List<int> input) {
+    final out = Uint8List(32);
+    for (var i = 0; i < input.length; i++) {
+      out[i % 32] = (out[i % 32] * 31 + input[i] + 7) & 0xff;
+    }
+    return out;
+  }
+
+  static Uint8List _canonical(Map<String, dynamic> metadata) {
+    final sorted = <String, dynamic>{};
+    final keys = metadata.keys.toList()..sort();
+    for (final k in keys) {
+      sorted[k] = metadata[k];
+    }
+    return Uint8List.fromList(utf8.encode(jsonEncode(sorted)));
+  }
+
+  @override
+  Uint8List metadataCommitment(Map<String, dynamic> metadata) =>
+      _fold32(_canonical(metadata));
+
+  @override
+  bool verifyMetadata(Map<String, dynamic> metadata, Uint8List sha256) {
+    final expected = metadataCommitment(metadata);
+    if (expected.length != sha256.length) return false;
+    var diff = 0;
+    for (var i = 0; i < expected.length; i++) {
+      diff |= expected[i] ^ sha256[i];
+    }
+    return diff == 0;
+  }
+
   @override
   DeferredEncryptResult encrypt({
     required Uint8List body,
-    required Uint8List metadata,
+    required Map<String, dynamic> metadata,
   }) {
-    // Fake "content key" derived deterministically from metadata so tests
-    // can assert AAD binding without real AES-GCM.
-    final key = Uint8List.fromList(
-        utf8.encode('key:${base64Encode(metadata)}').take(32).toList()
-          ..addAll(List.filled(32, 7)));
+    // sha256 = the metadata commitment, which also doubles as the AEAD AAD.
+    final commitment = metadataCommitment(metadata);
+    final key = _fold32(utf8.encode('key:${base64Encode(commitment)}'));
     final nonce = Uint8List.fromList(List.filled(12, 1));
-    // "Ciphertext" = body XOR key (repeating) + metadata length tag, just
-    // enough to exercise tamper detection deterministically.
     final ciphertext = Uint8List.fromList(
         List.generate(body.length, (i) => body[i] ^ key[i % key.length]));
-    final sha256 = Uint8List.fromList(utf8
-        .encode('sha:${ciphertext.length}:${metadata.length}')
-        .take(32)
-        .toList());
     return DeferredEncryptResult(
-      contentKey: key.sublist(0, 32),
+      contentKey: key,
       nonce: nonce,
       ciphertext: ciphertext,
-      sha256: sha256,
+      sha256: commitment,
     );
   }
 
   @override
-  Uint8List wrapKey({
+  Map<String, dynamic> wrapKey({
     required Uint8List contentKey,
     required Map<String, dynamic> recipientBundle,
   }) {
-    final deviceId = recipientBundle['device_id'] as String;
+    final deviceId = _deviceIdOf(recipientBundle);
     _wrappedKeyByRecipient[deviceId] = contentKey;
-    // Envelope is just an opaque marker carrying the recipient device id;
-    // real core would produce an X3DH/DR-wrapped ciphertext.
-    return Uint8List.fromList(utf8.encode('envelope:$deviceId'));
+    // Structured envelope shape from the Task 3 contract.
+    return {
+      'alg': 'DEFERRED+AES-GCM',
+      'x3dh_initial': {'to': deviceId},
+      'nonce_b64': base64Encode(List.filled(12, 2)),
+      'wrapped_key_b64': base64Encode(contentKey),
+    };
   }
 
   @override
   Uint8List unwrapKey({
-    required Uint8List envelope,
+    required Map<String, dynamic> envelope,
     required Map<String, dynamic> localIdentity,
   }) {
-    final marker = utf8.decode(envelope);
-    final deviceId = marker.split(':').last;
+    final deviceId = envelope['x3dh_initial']['to'] as String;
     final key = _wrappedKeyByRecipient[deviceId];
     if (key == null) {
       throw StateError('no envelope for device $deviceId');
     }
-    if (localIdentity['device_id'] != deviceId) {
+    // Recipient identity must match the device the key was wrapped for.
+    if (localIdentity['ik_secret_b64'] != 'ik:$deviceId') {
       throw StateError('envelope not addressed to this device');
     }
     return key;
@@ -83,18 +116,35 @@ class _FakeDeferredCryptoEngine implements DeferredCryptoEngine {
     return Uint8List.fromList(List.generate(
         ciphertext.length, (i) => ciphertext[i] ^ key[i % key.length]));
   }
+
+  static String _deviceIdOf(Map<String, dynamic> bundle) {
+    final id = bundle['identity'];
+    if (id is Map && id['device_id'] != null) return '${id['device_id']}';
+    return '${bundle['device_id']}';
+  }
 }
+
+Map<String, dynamic> _bundleFor(String deviceId) => {
+      'identity': {'device_id': deviceId, 'identity_dh_pub_b64': 'x'},
+      'signed_prekey': {'key_id': 1, 'dh_pub_b64': 'y', 'signature_b64': 'z'},
+      'one_time_prekey_b64': null,
+      'one_time_prekey_id': null,
+    };
+
+Map<String, dynamic> _localIdentityFor(String deviceId) => {
+      'ik_secret_b64': 'ik:$deviceId',
+      'spk_secret_b64': 'spk:$deviceId',
+      'otk_secret_b64': null,
+    };
 
 void main() {
   group('E2eV2Deferred round trip (fake engine)', () {
-    test(
-        'encryptPending -> wrapKeyForRecipient -> unwrapAndDecrypt recovers body',
-        () {
+    test('encrypt -> wrap -> verify+unwrap+decrypt recovers body', () {
       final fake = _FakeDeferredCryptoEngine();
       final deferred = E2eV2Deferred(engine: fake);
 
       final body = Uint8List.fromList(utf8.encode('hello deferred world'));
-      final metadata = Uint8List.fromList(utf8.encode('text/plain'));
+      final metadata = {'id': 'msg-1', 'mime': 'text/plain'};
 
       final pending = deferred.encryptPending(body: body, metadata: metadata);
       expect(
@@ -106,43 +156,91 @@ void main() {
             'sha256_b64'
           ]));
 
-      final envelopeB64 = deferred.wrapKeyForRecipient(
+      final envelope = deferred.wrapKeyForRecipient(
         contentKeyB64: pending['content_key_b64']!,
-        recipientBundle: {'device_id': 'peer-device-1'},
+        recipientBundle: _bundleFor('peer-device-1'),
       );
 
-      final recovered = deferred.unwrapAndDecrypt(
-        envelopeB64: envelopeB64,
-        localIdentity: {'device_id': 'peer-device-1'},
+      final recovered = deferred.verifyUnwrapAndDecrypt(
+        metadata: metadata,
+        sha256B64: pending['sha256_b64']!,
+        envelope: envelope,
+        localIdentity: _localIdentityFor('peer-device-1'),
         ciphertextB64: pending['ciphertext_b64']!,
         nonceB64: pending['nonce_b64']!,
-        sha256B64: pending['sha256_b64']!,
       );
 
       expect(utf8.decode(recovered), 'hello deferred world');
     });
 
-    test(
-        'unwrap fails closed for the wrong recipient device (no plaintext fallback)',
+    test('spoofed metadata is rejected even with a valid ciphertext/sha256',
         () {
+      // CRITICAL 1 threat: a compromised transport rewrites the plaintext
+      // metadata it relays. The recipient recomputes the commitment from the
+      // metadata IT received and must reject the mismatch before trusting body.
       final fake = _FakeDeferredCryptoEngine();
       final deferred = E2eV2Deferred(engine: fake);
+      final metadata = {'id': 'msg-1', 'mime': 'text/plain'};
       final pending = deferred.encryptPending(
         body: Uint8List.fromList(utf8.encode('secret')),
-        metadata: Uint8List.fromList(utf8.encode('text/plain')),
+        metadata: metadata,
       );
-      final envelopeB64 = deferred.wrapKeyForRecipient(
+      final envelope = deferred.wrapKeyForRecipient(
         contentKeyB64: pending['content_key_b64']!,
-        recipientBundle: {'device_id': 'device-a'},
+        recipientBundle: _bundleFor('device-a'),
+      );
+
+      final spoofed = {'id': 'msg-1', 'mime': 'text/markdown'};
+      expect(
+        () => deferred.verifyUnwrapAndDecrypt(
+          metadata: spoofed,
+          sha256B64: pending['sha256_b64']!,
+          envelope: envelope,
+          localIdentity: _localIdentityFor('device-a'),
+          ciphertextB64: pending['ciphertext_b64']!,
+          nonceB64: pending['nonce_b64']!,
+        ),
+        throwsStateError,
+      );
+    });
+
+    test('verifyMetadata: true for matching, false for tampered', () {
+      final fake = _FakeDeferredCryptoEngine();
+      final deferred = E2eV2Deferred(engine: fake);
+      final metadata = {'id': 'msg-9', 'mime': 'text/plain'};
+      final pending = deferred.encryptPending(
+        body: Uint8List.fromList(utf8.encode('x')),
+        metadata: metadata,
+      );
+      expect(deferred.verifyMetadata(metadata, pending['sha256_b64']!), isTrue);
+      expect(
+        deferred.verifyMetadata(
+            {'id': 'msg-9', 'mime': 'evil'}, pending['sha256_b64']!),
+        isFalse,
+      );
+    });
+
+    test('unwrap fails closed for the wrong recipient device', () {
+      final fake = _FakeDeferredCryptoEngine();
+      final deferred = E2eV2Deferred(engine: fake);
+      final metadata = {'id': 'msg-2', 'mime': 'text/plain'};
+      final pending = deferred.encryptPending(
+        body: Uint8List.fromList(utf8.encode('secret')),
+        metadata: metadata,
+      );
+      final envelope = deferred.wrapKeyForRecipient(
+        contentKeyB64: pending['content_key_b64']!,
+        recipientBundle: _bundleFor('device-a'),
       );
 
       expect(
-        () => deferred.unwrapAndDecrypt(
-          envelopeB64: envelopeB64,
-          localIdentity: {'device_id': 'device-b'},
+        () => deferred.verifyUnwrapAndDecrypt(
+          metadata: metadata,
+          sha256B64: pending['sha256_b64']!,
+          envelope: envelope,
+          localIdentity: _localIdentityFor('device-b'),
           ciphertextB64: pending['ciphertext_b64']!,
           nonceB64: pending['nonce_b64']!,
-          sha256B64: pending['sha256_b64']!,
         ),
         throwsStateError,
       );
@@ -153,22 +251,24 @@ void main() {
       final fake = _FakeDeferredCryptoEngine()
         ..tamperCiphertextOnDecrypt = true;
       final deferred = E2eV2Deferred(engine: fake);
+      final metadata = {'id': 'msg-3', 'mime': 'text/plain'};
       final pending = deferred.encryptPending(
         body: Uint8List.fromList(utf8.encode('secret')),
-        metadata: Uint8List.fromList(utf8.encode('text/plain')),
+        metadata: metadata,
       );
-      final envelopeB64 = deferred.wrapKeyForRecipient(
+      final envelope = deferred.wrapKeyForRecipient(
         contentKeyB64: pending['content_key_b64']!,
-        recipientBundle: {'device_id': 'device-a'},
+        recipientBundle: _bundleFor('device-a'),
       );
 
       expect(
-        () => deferred.unwrapAndDecrypt(
-          envelopeB64: envelopeB64,
-          localIdentity: {'device_id': 'device-a'},
+        () => deferred.verifyUnwrapAndDecrypt(
+          metadata: metadata,
+          sha256B64: pending['sha256_b64']!,
+          envelope: envelope,
+          localIdentity: _localIdentityFor('device-a'),
           ciphertextB64: pending['ciphertext_b64']!,
           nonceB64: pending['nonce_b64']!,
-          sha256B64: pending['sha256_b64']!,
         ),
         throwsStateError,
       );
@@ -179,37 +279,40 @@ void main() {
       final deferred = E2eV2Deferred(engine: fake);
       final body = Uint8List.fromList(utf8.encode('same body'));
 
-      final a = deferred.encryptPending(
-          body: body, metadata: Uint8List.fromList(utf8.encode('text/plain')));
-      final b = deferred.encryptPending(
-          body: body,
-          metadata: Uint8List.fromList(utf8.encode('text/markdown')));
+      final a = deferred
+          .encryptPending(body: body, metadata: {'id': 'a', 'mime': 'p'});
+      final b = deferred
+          .encryptPending(body: body, metadata: {'id': 'b', 'mime': 'p'});
 
       expect(a['content_key_b64'], isNot(b['content_key_b64']));
+    });
+
+    test('metadata key order does not change the commitment', () {
+      final fake = _FakeDeferredCryptoEngine();
+      final one = fake.metadataCommitment({'id': 'x', 'mime': 'p', 'kind': 1});
+      final two = fake.metadataCommitment({'kind': 1, 'mime': 'p', 'id': 'x'});
+      expect(one, two);
     });
   });
 
   group('NativeDeferredCryptoEngine (Task 9 FFI integration point)', () {
-    test(
-        'surfaces a clear error until shared-core Task 3/9 exports deferred_* natively',
+    test('fails closed until shared-core Task 3/9 exports deferred_* natively',
         () async {
       final core = E2eV2Core.instance;
-      // On this CI/dev machine the native lib may or may not be present;
-      // either way, calling the not-yet-implemented method must not silently
-      // succeed or fall back to plaintext.
       final loaded = await core.ensureLoaded();
       final engine = NativeDeferredCryptoEngine(core: core);
-      if (!loaded) {
-        expect(
-          () => engine.encrypt(body: Uint8List(0), metadata: Uint8List(0)),
-          throwsStateError,
-        );
-        return;
-      }
+      // Whether or not the native lib is present, a not-yet-implemented method
+      // must throw (never silently succeed / fall back to plaintext).
       expect(
-        () => engine.encrypt(body: Uint8List(0), metadata: Uint8List(0)),
+        () => engine.encrypt(body: Uint8List(0), metadata: const {'id': 'x'}),
         throwsStateError,
       );
+      if (!loaded) {
+        expect(
+          () => engine.metadataCommitment(const {'id': 'x'}),
+          throwsStateError,
+        );
+      }
     });
   });
 }

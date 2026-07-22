@@ -159,4 +159,45 @@ void main() {
     final dao = E2eOutboxDao(secure: _MemoryStore(), uid: 1, deviceId: 'd1');
     expect(() => dao.markSending('missing'), throwsStateError);
   });
+
+  group('DeferredInboxDao (recipient wrap-envelope + replay guard)', () {
+    test('wrap envelope persists per-mid across restart and can be cleared',
+        () async {
+      final store = _MemoryStore();
+      final before = DeferredInboxDao(secure: store, uid: 3, deviceId: 'phone');
+      await before.putWrapEnvelope(42, 'opaque-wrap-envelope');
+
+      // Simulated restart: new DAO, same backing store.
+      final after = DeferredInboxDao(secure: store, uid: 3, deviceId: 'phone');
+      expect(await after.getWrapEnvelope(42), 'opaque-wrap-envelope');
+
+      await after.deleteWrapEnvelope(42);
+      expect(await after.getWrapEnvelope(42), isNull);
+    });
+
+    test('message-id uniqueness is enforced and survives restart', () async {
+      final store = _MemoryStore();
+      final dao = DeferredInboxDao(secure: store, uid: 3, deviceId: 'phone');
+      expect(await dao.isMessageIdProcessed('msg-1'), isFalse);
+
+      await dao.markMessageIdProcessed('msg-1');
+      expect(await dao.isMessageIdProcessed('msg-1'), isTrue);
+
+      final afterRestart =
+          DeferredInboxDao(secure: store, uid: 3, deviceId: 'phone');
+      expect(await afterRestart.isMessageIdProcessed('msg-1'), isTrue);
+      expect(await afterRestart.isMessageIdProcessed('msg-2'), isFalse);
+    });
+
+    test('wrap envelopes and seen-ids are scoped per device', () async {
+      final store = _MemoryStore();
+      final a = DeferredInboxDao(secure: store, uid: 3, deviceId: 'phone');
+      final b = DeferredInboxDao(secure: store, uid: 3, deviceId: 'tablet');
+      await a.putWrapEnvelope(1, 'for-phone');
+      await a.markMessageIdProcessed('m');
+
+      expect(await b.getWrapEnvelope(1), isNull);
+      expect(await b.isMessageIdProcessed('m'), isFalse);
+    });
+  });
 }

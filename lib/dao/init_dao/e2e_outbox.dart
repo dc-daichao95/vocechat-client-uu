@@ -251,6 +251,49 @@ class E2eOutboxDao {
   }
 }
 
+/// Recipient-side store for the deferred-DM (`dr-pending`) receive path.
+///
+/// Holds two things, both restart-persistent in secure storage:
+/// 1. The wrap-key envelope for a received `dr-pending` message, keyed by the
+///    canonical `mid`. The sender completes the envelope asynchronously and
+///    the server delivers it via the `e2e_pending_envelope_added` SSE event,
+///    which may arrive before OR after the message body itself — so it must be
+///    persisted until the body is available to decrypt.
+/// 2. Processed per-message ids, to enforce message-id uniqueness on receipt
+///    (Task 3 replay-defense requirement): a unique id lives inside the
+///    metadata that is bound into the AEAD commitment, and the recipient
+///    rejects any id it has already accepted.
+class DeferredInboxDao {
+  final SecureValueStore _secure;
+  final int uid;
+  final String deviceId;
+
+  DeferredInboxDao({
+    SecureValueStore? secure,
+    required this.uid,
+    required this.deviceId,
+  }) : _secure = secure ?? const _FlutterSecureValueStore();
+
+  String _wrapKey(int mid) => 'e2e_deferred_wrap:$uid:$deviceId:$mid';
+  String _seenKey(String messageId) =>
+      'e2e_deferred_seen:$uid:$deviceId:$messageId';
+
+  Future<void> putWrapEnvelope(int mid, String envelope) =>
+      _secure.write(_wrapKey(mid), envelope);
+
+  Future<String?> getWrapEnvelope(int mid) => _secure.read(_wrapKey(mid));
+
+  Future<void> deleteWrapEnvelope(int mid) => _secure.delete(_wrapKey(mid));
+
+  /// True if [messageId] (the unique id carried in a `dr-pending` message's
+  /// metadata) has already been accepted/decrypted on this device.
+  Future<bool> isMessageIdProcessed(String messageId) async =>
+      (await _secure.read(_seenKey(messageId))) != null;
+
+  Future<void> markMessageIdProcessed(String messageId) =>
+      _secure.write(_seenKey(messageId), '1');
+}
+
 class _FlutterSecureValueStore implements SecureValueStore {
   static const FlutterSecureStorage _storage = FlutterSecureStorage(
     wOptions: WindowsOptions(),

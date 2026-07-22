@@ -355,10 +355,15 @@ class VoceSendService {
 
       final e2eApi = E2eApi(App.app.chatServerM.fullUrl);
       final pendingRes = await e2eApi.getPendingEnvelopes(uid);
-      final pendingMids =
-          pendingRes.statusCode == 200 && pendingRes.data is List
-              ? (pendingRes.data as List).map((e) => (e as num).toInt()).toSet()
-              : <int>{};
+      // Server returns Vec<E2ePendingDmMessage> — a JSON array of objects
+      // `{ mid, created_at }`, NOT bare ints.
+      final pendingMids = <int>{};
+      if (pendingRes.statusCode == 200 && pendingRes.data is List) {
+        for (final row in pendingRes.data as List) {
+          final mid = row is Map ? (row['mid'] as num?)?.toInt() : null;
+          if (mid != null) pendingMids.add(mid);
+        }
+      }
 
       for (final entry in toPeer) {
         if (entry.mid < 0 || !pendingMids.contains(entry.mid)) continue;
@@ -381,6 +386,7 @@ class VoceSendService {
               contentKeyB64: contentKeyB64,
               recipientBundle: bundle.data as Map,
             );
+            if (envelope == null) continue;
             await e2eApi.putPendingEnvelope(
               entry.mid,
               recipientUid: uid,
