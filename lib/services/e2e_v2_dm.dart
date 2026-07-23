@@ -82,7 +82,9 @@ class E2eV2Dm {
     if (!peerSupportsV2(bundle)) return null;
     final deviceId = local['deviceId'] as String;
     final peerDevice = bundle['device_id'] as String;
-    if (peerDevice == deviceId) return null;
+    // Skip only this account's own device. Shared browser/app device ids
+    // across accounts must still encrypt to the other uid.
+    if (recipientUid == myUid && peerDevice == deviceId) return null;
 
     final core = local['core'] as E2eV2Core;
     final secret = local['secret'] as Map<String, dynamic>;
@@ -168,8 +170,13 @@ class E2eV2Dm {
     final unique = <Map>[];
     for (final b in list) {
       final did = b['device_id'] as String?;
-      if (did == null || seen.contains(did) || !peerSupportsV2(b)) continue;
-      seen.add(did);
+      final bUid = (b['uid'] as num?)?.toInt();
+      if (did == null || bUid == null || !peerSupportsV2(b)) continue;
+      // Deduplicate by (uid, device_id) so two accounts sharing one device
+      // id are not collapsed into a single fanout target.
+      final key = '$bUid:$did';
+      if (seen.contains(key)) continue;
+      seen.add(key);
       unique.add(b);
     }
 
